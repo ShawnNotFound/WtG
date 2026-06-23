@@ -21,6 +21,14 @@ export interface Player {
   id: string;
   nickname: string;
   isHost: boolean;
+  isAi?: boolean;
+  aiConfig?: {
+    stylePrompt?: string;
+    creativity?: number;
+    submitEverySeconds?: number;
+    provider?: 'openai' | 'deepseek';
+    model?: string;
+  };
   joinedAt: string;
   totalScore?: number;
   planetPanel?: PlanetPanelEntry[];
@@ -32,13 +40,21 @@ interface SessionState {
   joinCode: string;
   status: string;
   hostPlayerId: string | null;
+  llmConfig?: {
+    provider?: 'openai' | 'deepseek';
+    model?: string;
+    baseUrl?: string;
+  };
   phase: string;
+  isPaused: boolean;
   currentRound: number;
   playMinutes: number;
   breakMinutes: number;
   maxRounds: number;
   phaseStartedAt: string | null;
   phaseEndsAt: string | null;
+  pausedAt: string | null;
+  pauseRemainingMs: number | null;
   serverNow: string;
   inGameNow: string | null;
   timelineSpeedRatio: number;

@@ -18,7 +18,7 @@ import { SEED_HEADLINES } from './seedHeadlines.js';
  * full game flow can be exercised in ~3 minutes instead of ~46.
  * does not affect production behaviour — flag must be explicitly set.
  */
-const TEST_MODE = process.env.GAME_TEST_MODE === 'true';
+const TEST_MODE = process.env.NODE_ENV !== 'test' && process.env.GAME_TEST_MODE === 'true';
 const TIME_SCALE = TEST_MODE ? 1 / 16 : 1;
 
 if (TEST_MODE) {
@@ -107,6 +107,7 @@ export function computeNextPhase(
 class GameLoopInstance {
   private timerHandle: NodeJS.Timeout | null = null;
   private seedDripHandle: NodeJS.Timeout | null = null;
+  private seedDripIndex = 0;
   private archivePlayerId: string | null = null;
   private state: GameSessionRuntimeState;
   private io: Server;
@@ -119,6 +120,10 @@ class GameLoopInstance {
       phaseStartedAt: null,
       phaseEndsAt: null,
       inGameStartAt: null,
+      isPaused: false,
+      pausedAt: null,
+      pauseRemainingMs: null,
+      pauseTimelineSpeedRatio: null,
     };
     this.io = io;
   }
@@ -131,7 +136,8 @@ class GameLoopInstance {
     const result = await pool.query(
       `SELECT phase, current_round, phase_started_at, phase_ends_at, 
               in_game_start_at, play_minutes, break_minutes, max_rounds,
-              timeline_speed_ratio
+              timeline_speed_ratio, is_paused, paused_at, pause_remaining_ms,
+              pause_timeline_speed_ratio
        FROM game_sessions 
        WHERE id = $1`,
       [this.state.sessionId]
@@ -154,7 +160,12 @@ class GameLoopInstance {
       this.state.breakMinutes = row.break_minutes;
       this.state.maxRounds = row.max_rounds;
       this.state.timelineSpeedRatio = row.timeline_speed_ratio;
+      this.state.isPaused = row.is_paused === true;
+      this.state.pausedAt = row.paused_at ? new Date(row.paused_at) : null;
+      this.state.pauseRemainingMs = row.pause_remaining_ms ?? null;
+      this.state.pauseTimelineSpeedRatio = row.pause_timeline_speed_ratio ?? null;
     }
+
   }
 
   async startGame(archivePlayerId?: string): Promise<void> {
@@ -227,6 +238,14 @@ class GameLoopInstance {
     this.state.phaseStartedAt = phaseStartedAt;
     this.state.phaseEndsAt = phaseEndsAt;
     this.state.inGameStartAt = inGameStartAt;
+    this.state.isPaused = false;
+    this.state.pausedAt = null;
+    this.state.pauseRemainingMs = null;
+    this.state.pauseTimelineSpeedRatio = null;
+
+    if (toPhase === 'TUTORIAL') {
+      this.seedDripIndex = 0;
+    }
 
     await this.persistStateTransition(fromPhase, toPhase, roundNo);
 
@@ -266,24 +285,7 @@ class GameLoopInstance {
       });
     }
 
-    // schedule next transition if not finished
-    if (toPhase !== 'FINISHED' && phaseEndsAt) {
-      const nextPhase = this.computeNextPhase(toPhase, roundNo);
-      const delay = phaseEndsAt.getTime() - now.getTime();
-
-      this.timerHandle = setTimeout(() => {
-        this.transitionToPhase(nextPhase.phase, nextPhase.round).catch((err) =>
-          console.error(
-            `[GameLoop ${this.state.joinCode}] Auto-transition failed:`,
-            err
-          )
-        );
-      }, delay);
-
-      console.log(
-        `[GameLoop ${this.state.joinCode}] Scheduled transition to ${nextPhase.phase} in ${Math.round(delay / 1000)}s`
-      );
-    }
+    this.scheduleNextTransition(now);
   }
 
   private computeNextPhase(
@@ -312,6 +314,10 @@ class GameLoopInstance {
              in_game_start_at = $5,
              timeline_speed_ratio = $6,
              status = $7,
+             is_paused = FALSE,
+             paused_at = NULL,
+             pause_remaining_ms = NULL,
+             pause_timeline_speed_ratio = NULL,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = $8`,
         [
@@ -350,6 +356,7 @@ class GameLoopInstance {
         s.join_code,
         s.status,
         s.host_player_id,
+        s.llm_config,
         s.phase,
         s.current_round,
         s.play_minutes,
@@ -357,6 +364,9 @@ class GameLoopInstance {
         s.max_rounds,
         s.phase_started_at,
         s.phase_ends_at,
+        s.is_paused,
+        s.paused_at,
+        s.pause_remaining_ms,
         s.in_game_start_at,
         s.timeline_speed_ratio,
         s.planet_usage_global,
@@ -366,6 +376,8 @@ class GameLoopInstance {
             'id', p.id,
             'nickname', p.nickname,
             'isHost', p.is_host,
+            'isAi', p.is_ai,
+            'aiConfig', p.ai_config,
             'joinedAt', p.joined_at,
             'totalScore', p.total_score,
             'planetUsageState', p.planet_usage_state
@@ -409,6 +421,8 @@ class GameLoopInstance {
           id: p.id,
           nickname: p.nickname,
           isHost: p.isHost,
+          isAi: p.isAi,
+          aiConfig: p.aiConfig,
           joinedAt: p.joinedAt,
           totalScore: p.totalScore ?? 0,
           planetPanel: computePlanetPanel(
@@ -425,6 +439,7 @@ class GameLoopInstance {
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,
+      llmConfig: session.llm_config,
       phase: session.phase,
       currentRound: session.current_round,
       playMinutes: session.play_minutes,
@@ -436,6 +451,11 @@ class GameLoopInstance {
       phaseEndsAt: session.phase_ends_at
         ? new Date(session.phase_ends_at).toISOString()
         : null,
+      isPaused: session.is_paused === true,
+      pausedAt: session.paused_at
+        ? new Date(session.paused_at).toISOString()
+        : null,
+      pauseRemainingMs: session.pause_remaining_ms ?? null,
       serverNow: serverNow.toISOString(),
       inGameNow: inGameNow ? inGameNow.toISOString() : null,
       timelineSpeedRatio: session.timeline_speed_ratio,
@@ -551,17 +571,53 @@ class GameLoopInstance {
     }
   }
 
+  private async loadArchiveSeedState(): Promise<void> {
+    const archiveResult = await pool.query(
+      `SELECT id
+       FROM session_players
+       WHERE session_id = $1 AND is_system = TRUE
+       ORDER BY joined_at ASC
+       LIMIT 1`,
+      [this.state.sessionId]
+    );
+
+    this.archivePlayerId = archiveResult.rows[0]?.id ?? this.archivePlayerId;
+
+    if (!this.archivePlayerId) {
+      return;
+    }
+
+    const seedCount = await pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM game_session_headlines
+       WHERE session_id = $1 AND player_id = $2 AND llm_status = 'seed'`,
+      [this.state.sessionId, this.archivePlayerId]
+    );
+    this.seedDripIndex = seedCount.rows[0]?.count ?? this.seedDripIndex;
+  }
+
   private startSeedDrip(): void {
+    if (!this.archivePlayerId) {
+      return;
+    }
+
+    if (this.seedDripHandle) {
+      return;
+    }
+
     const seeds = [...SEED_HEADLINES];
     const intervalMs = Math.floor(TUTORIAL_DURATION_MS / (seeds.length + 1));
-    let index = 0;
 
     console.log(
-      `[GameLoop ${this.state.joinCode}] Starting seed drip: ${seeds.length} headlines over ${TUTORIAL_DURATION_MS / 1000}s (every ${Math.round(intervalMs / 1000)}s)`
+      `[GameLoop ${this.state.joinCode}] Starting seed drip: ${seeds.length - this.seedDripIndex} remaining headlines over ${TUTORIAL_DURATION_MS / 1000}s (every ${Math.round(intervalMs / 1000)}s)`
     );
 
     this.seedDripHandle = setInterval(async () => {
-      if (index >= seeds.length) {
+      if (this.state.isPaused) {
+        return;
+      }
+
+      if (this.seedDripIndex >= seeds.length) {
         if (this.seedDripHandle) {
           clearInterval(this.seedDripHandle);
           this.seedDripHandle = null;
@@ -569,7 +625,7 @@ class GameLoopInstance {
         return;
       }
 
-      const seed = seeds[index];
+      const seed = seeds[this.seedDripIndex];
       const inGameSubmittedAt = new Date(seed.inGameYear, seed.inGameMonth - 1, 1).toISOString();
 
       try {
@@ -603,13 +659,168 @@ class GameLoopInstance {
         });
       } catch (error) {
         console.error(
-          `[GameLoop ${this.state.joinCode}] Failed to insert seed headline ${index}:`,
+          `[GameLoop ${this.state.joinCode}] Failed to insert seed headline ${this.seedDripIndex}:`,
           error
         );
       }
 
-      index++;
+      this.seedDripIndex++;
     }, intervalMs);
+  }
+
+  private scheduleNextTransition(now = new Date()): void {
+    if (this.timerHandle) {
+      clearTimeout(this.timerHandle);
+      this.timerHandle = null;
+    }
+
+    if (this.state.isPaused || this.state.phase === 'FINISHED' || !this.state.phaseEndsAt) {
+      return;
+    }
+
+    const nextPhase = this.computeNextPhase(this.state.phase, this.state.currentRound);
+    const delay = Math.max(0, this.state.phaseEndsAt.getTime() - now.getTime());
+
+    this.timerHandle = setTimeout(() => {
+      if (this.state.isPaused) {
+        return;
+      }
+      this.transitionToPhase(nextPhase.phase, nextPhase.round).catch((err) =>
+        console.error(
+          `[GameLoop ${this.state.joinCode}] Auto-transition failed:`,
+          err
+        )
+      );
+    }, delay);
+
+    console.log(
+      `[GameLoop ${this.state.joinCode}] Scheduled transition to ${nextPhase.phase} in ${Math.round(delay / 1000)}s`
+    );
+  }
+
+  async pauseGame(): Promise<void> {
+    await this.loadFromDatabase();
+
+    if (this.state.isPaused) {
+      await this.broadcastGameState();
+      return;
+    }
+
+    if (this.state.phase === 'WAITING' || this.state.phase === 'FINISHED') {
+      throw new Error(`Cannot pause game while phase is ${this.state.phase}`);
+    }
+
+    const now = new Date();
+    const pauseTimelineSpeedRatio = this.state.timelineSpeedRatio;
+    const pauseRemainingMs = this.state.phaseEndsAt
+      ? Math.max(0, this.state.phaseEndsAt.getTime() - now.getTime())
+      : null;
+    let inGameStartAt = this.state.inGameStartAt;
+
+    if (
+      this.state.phase === 'PLAYING' &&
+      inGameStartAt &&
+      this.state.phaseStartedAt &&
+      pauseTimelineSpeedRatio > 0
+    ) {
+      const realElapsed = Math.max(0, now.getTime() - this.state.phaseStartedAt.getTime());
+      inGameStartAt = new Date(inGameStartAt.getTime() + realElapsed * pauseTimelineSpeedRatio);
+    }
+
+    if (this.timerHandle) {
+      clearTimeout(this.timerHandle);
+      this.timerHandle = null;
+    }
+
+    if (this.seedDripHandle) {
+      clearInterval(this.seedDripHandle);
+      this.seedDripHandle = null;
+    }
+
+    this.state.isPaused = true;
+    this.state.pausedAt = now;
+    this.state.pauseRemainingMs = pauseRemainingMs;
+    this.state.pauseTimelineSpeedRatio = pauseTimelineSpeedRatio;
+    this.state.phaseStartedAt = now;
+    this.state.phaseEndsAt = null;
+    this.state.inGameStartAt = inGameStartAt;
+    this.state.timelineSpeedRatio = 0;
+
+    await pool.query(
+      `UPDATE game_sessions
+       SET is_paused = TRUE,
+           paused_at = $1,
+           pause_remaining_ms = $2,
+           pause_timeline_speed_ratio = $3,
+           phase_started_at = $1,
+           phase_ends_at = NULL,
+           in_game_start_at = $4,
+           timeline_speed_ratio = 0,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [
+        now,
+        pauseRemainingMs,
+        pauseTimelineSpeedRatio,
+        inGameStartAt,
+        this.state.sessionId,
+      ]
+    );
+
+    await this.broadcastGameState();
+    console.log(`[GameLoop ${this.state.joinCode}] Paused`);
+  }
+
+  async resumeGame(): Promise<void> {
+    await this.loadFromDatabase();
+
+    if (!this.state.isPaused) {
+      this.scheduleNextTransition();
+      await this.broadcastGameState();
+      return;
+    }
+
+    if (this.state.phase === 'WAITING' || this.state.phase === 'FINISHED') {
+      throw new Error(`Cannot resume game while phase is ${this.state.phase}`);
+    }
+
+    const now = new Date();
+    const remainingMs = Math.max(0, this.state.pauseRemainingMs ?? 0);
+    const phaseEndsAt = remainingMs > 0 ? new Date(now.getTime() + remainingMs) : now;
+    const timelineSpeedRatio = this.state.phase === 'PLAYING'
+      ? this.state.pauseTimelineSpeedRatio ?? computeRoundSpeedRatio(this.state.currentRound, this.state.playMinutes * TIME_SCALE)
+      : 0;
+
+    this.state.isPaused = false;
+    this.state.pausedAt = null;
+    this.state.pauseRemainingMs = null;
+    this.state.pauseTimelineSpeedRatio = null;
+    this.state.phaseStartedAt = now;
+    this.state.phaseEndsAt = phaseEndsAt;
+    this.state.timelineSpeedRatio = timelineSpeedRatio;
+
+    await pool.query(
+      `UPDATE game_sessions
+       SET is_paused = FALSE,
+           paused_at = NULL,
+           pause_remaining_ms = NULL,
+           pause_timeline_speed_ratio = NULL,
+           phase_started_at = $1,
+           phase_ends_at = $2,
+           timeline_speed_ratio = $3,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4`,
+      [now, phaseEndsAt, timelineSpeedRatio, this.state.sessionId]
+    );
+
+    if (this.state.phase === 'TUTORIAL') {
+      await this.loadArchiveSeedState();
+      this.startSeedDrip();
+    }
+
+    this.scheduleNextTransition(now);
+    await this.broadcastGameState();
+    console.log(`[GameLoop ${this.state.joinCode}] Resumed`);
   }
 
   stop(): void {
@@ -682,6 +893,16 @@ class GameLoopManager {
   async handleHostStartGame(sessionId: string, joinCode: string, archivePlayerId?: string): Promise<void> {
     const loop = await this.ensureLoopForSession(sessionId, joinCode);
     await loop.startGame(archivePlayerId);
+  }
+
+  async pauseSession(sessionId: string, joinCode: string): Promise<void> {
+    const loop = await this.ensureLoopForSession(sessionId, joinCode);
+    await loop.pauseGame();
+  }
+
+  async resumeSession(sessionId: string, joinCode: string): Promise<void> {
+    const loop = await this.ensureLoopForSession(sessionId, joinCode);
+    await loop.resumeGame();
   }
 
   stopLoop(sessionId: string): void {

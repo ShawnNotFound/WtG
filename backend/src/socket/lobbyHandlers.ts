@@ -18,21 +18,21 @@ import {
 import { getRoundSummary, getSessionIdFromJoinCode } from '../game/summaryService.js';
 import { computeInGameNow } from '../game/inGameTime.js';
 import { SEED_HEADLINES } from '../game/seedHeadlines.js';
+import { aiPlayerManager } from '../ai/aiPlayerManager.js';
+import { worldStateProcessor } from '../world/worldStateService.js';
+import {
+  canSubmitHeadline,
+  recordHeadlineSubmission,
+  getHeadlineCooldownMs,
+  clearSessionRateLimits,
+} from '../game/headlineCooldown.js';
 
-
-// rate limiting: track last submission time per player.
-// key: `${sessionId}:${playerId}`, value: timestamp in ms
-const lastHeadlineSubmission: Map<string, number> = new Map();
+export { clearSessionRateLimits };
 
 // the juror only sees the most recent N headlines (rolling window) when judging
 // plausibility, linking connections, and drafting variations. N = the number of
 // archive/seed headlines, so old context drops off as the timeline grows.
 const JUROR_HISTORY_WINDOW = SEED_HEADLINES.length;
-
-// in test mode (GAME_TEST_MODE=true), the cooldown is scaled to ~6s
-// to match the compressed game timing in gameLoop.ts.
-const TEST_MODE = process.env.GAME_TEST_MODE === 'true';
-const HEADLINE_COOLDOWN_MS = TEST_MODE ? Math.round(90_000 / 16) : 90_000; // ~6s test, 90s normal
 
 /**
  * count unique other authors from STRONG linked headlines using db lookup.
@@ -84,45 +84,6 @@ async function deriveUniqueOtherAuthorCount(
   }
 }
 
-/**
- * check if a player can submit a headline (rate limiting)
- */
-function canSubmitHeadline(sessionId: string, playerId: string): { allowed: boolean; remainingMs: number } {
-  const key = `${sessionId}:${playerId}`;
-  const lastSubmission = lastHeadlineSubmission.get(key);
-  const now = Date.now();
-
-  if (!lastSubmission) {
-    return { allowed: true, remainingMs: 0 };
-  }
-
-  const elapsed = now - lastSubmission;
-  if (elapsed >= HEADLINE_COOLDOWN_MS) {
-    return { allowed: true, remainingMs: 0 };
-  }
-
-  return { allowed: false, remainingMs: HEADLINE_COOLDOWN_MS - elapsed };
-}
-
-/**
- * record a headline submission for rate limiting
- */
-function recordHeadlineSubmission(sessionId: string, playerId: string): void {
-  const key = `${sessionId}:${playerId}`;
-  lastHeadlineSubmission.set(key, Date.now());
-}
-
-/**
- * clear rate limit data for a session (call on session cleanup)
- */
-export function clearSessionRateLimits(sessionId: string): void {
-  for (const key of lastHeadlineSubmission.keys()) {
-    if (key.startsWith(`${sessionId}:`)) {
-      lastHeadlineSubmission.delete(key);
-    }
-  }
-}
-
 interface JoinLobbyData {
   joinCode: string;
   playerId: string;
@@ -133,13 +94,21 @@ interface SessionState {
   joinCode: string;
   status: string;
   hostPlayerId: string | null;
+  llmConfig?: {
+    provider?: 'openai' | 'deepseek';
+    model?: string;
+    baseUrl?: string;
+  };
   phase: string;
+  isPaused: boolean;
   currentRound: number;
   playMinutes: number;
   breakMinutes: number;
   maxRounds: number;
   phaseStartedAt: string | null;
   phaseEndsAt: string | null;
+  pausedAt: string | null;
+  pauseRemainingMs: number | null;
   serverNow: string;
   inGameNow: string | null;
   timelineSpeedRatio: number;
@@ -147,6 +116,14 @@ interface SessionState {
     id: string;
     nickname: string;
     isHost: boolean;
+    isAi?: boolean;
+    aiConfig?: {
+      stylePrompt?: string;
+      creativity?: number;
+      submitEverySeconds?: number;
+      provider?: 'openai' | 'deepseek';
+      model?: string;
+    };
     joinedAt: string;
     totalScore?: number;
     planetPanel?: PlanetPanelEntry[];
@@ -170,13 +147,17 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
         s.join_code,
         s.status,
         s.host_player_id,
+        s.llm_config,
         s.phase,
+        s.is_paused,
         s.current_round,
         s.play_minutes,
         s.break_minutes,
         s.max_rounds,
         s.phase_started_at,
         s.phase_ends_at,
+        s.paused_at,
+        s.pause_remaining_ms,
         s.in_game_start_at,
         s.timeline_speed_ratio,
         s.planet_usage_global,
@@ -186,6 +167,8 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
             'id', p.id,
             'nickname', p.nickname,
             'isHost', p.is_host,
+            'isAi', p.is_ai,
+            'aiConfig', p.ai_config,
             'joinedAt', p.joined_at,
             'totalScore', p.total_score,
             'planetUsageState', p.planet_usage_state
@@ -226,6 +209,8 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
           id: p.id,
           nickname: p.nickname,
           isHost: p.isHost,
+          isAi: p.isAi,
+          aiConfig: p.aiConfig,
           joinedAt: p.joinedAt,
           totalScore: p.totalScore ?? 0,
           planetPanel: computePlanetPanel(
@@ -242,7 +227,9 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,
+      llmConfig: session.llm_config,
       phase: session.phase,
+      isPaused: session.is_paused === true,
       currentRound: session.current_round,
       playMinutes: session.play_minutes,
       breakMinutes: session.break_minutes,
@@ -253,6 +240,10 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
       phaseEndsAt: session.phase_ends_at
         ? new Date(session.phase_ends_at).toISOString()
         : null,
+      pausedAt: session.paused_at
+        ? new Date(session.paused_at).toISOString()
+        : null,
+      pauseRemainingMs: session.pause_remaining_ms ?? null,
       serverNow: serverNow.toISOString(),
       inGameNow: inGameNow ? inGameNow.toISOString() : null,
       timelineSpeedRatio: session.timeline_speed_ratio,
@@ -453,6 +444,10 @@ export function setupLobbyHandlers(io: Server): void {
 
         // start the game via GameLoopManager (seeds will drip-feed during tutorial phase)
         await gameLoopManager.handleHostStartGame(sessionState.id, joinCode, archivePlayerId);
+        aiPlayerManager.startSession(io, sessionState.id, joinCode);
+        worldStateProcessor.enqueueInitialBuild(sessionState.id).catch((error) => {
+          console.error(`[WorldState ${joinCode}] Initial graph enqueue failed:`, error);
+        });
 
         const updatedState = await getSessionState(joinCode);
 
@@ -559,6 +554,14 @@ export function setupLobbyHandlers(io: Server): void {
           return;
         }
 
+        if (sessionState.isPaused) {
+          callback?.({
+            success: false,
+            error: 'The game is paused by the admin. Submissions will reopen when the game resumes.',
+          });
+          return;
+        }
+
         // check rate limit
         const rateLimitCheck = canSubmitHeadline(sessionState.id, playerId);
         if (!rateLimitCheck.allowed) {
@@ -593,6 +596,7 @@ export function setupLobbyHandlers(io: Server): void {
 
         // call transformation service (llm evaluation + dice roll)
         const transformResult = await transformHeadline({
+          sessionId: sessionState.id,
           storyDirection,
           headlinesList,
           planetList,
@@ -683,7 +687,19 @@ export function setupLobbyHandlers(io: Server): void {
         callback?.({
           success: true,
           headline: headlineEvent,
-          cooldownMs: HEADLINE_COOLDOWN_MS,
+          cooldownMs: getHeadlineCooldownMs(),
+        });
+
+        worldStateProcessor.enqueueHeadlineUpdate({
+          sessionId: sessionState.id,
+          headlineId: insertedRow.id,
+          headlineText: transformResult.selectedHeadline,
+          storyDirection,
+          playerNickname: player.nickname,
+          roundNo: sessionState.currentRound,
+          inGameSubmittedAt: headlineEvent.inGameSubmittedAt,
+        }).catch((error) => {
+          console.error(`[WorldState ${joinCode}] Headline update enqueue failed:`, error);
         });
 
         console.log(

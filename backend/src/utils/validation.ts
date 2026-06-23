@@ -17,9 +17,26 @@ export const joinCodeSchema = z
   .length(6, 'Join code must be exactly 6 characters')
   .regex(/^[A-Z0-9]+$/, 'Join code must contain only uppercase letters and numbers');
 
+export const aiPlayerConfigSchema = z.object({
+  nickname: nicknameSchema.optional(),
+  stylePrompt: z.string().max(500).optional(),
+  creativity: z.number().min(0).max(1).optional(),
+  submitEverySeconds: z.number().min(0).max(600).optional(),
+  provider: z.enum(['openai', 'deepseek']).optional(),
+  model: z.string().min(1).max(80).optional(),
+});
+
+export const llmConfigSchema = z.object({
+  provider: z.enum(['openai', 'deepseek']).optional(),
+  model: z.string().min(1).max(100).optional(),
+  baseUrl: z.string().min(1).max(200).optional(),
+});
+
 // request body schemas
 export const createSessionSchema = z.object({
   hostNickname: nicknameSchema,
+  aiPlayers: z.array(aiPlayerConfigSchema).max(8).optional(),
+  llmConfig: llmConfigSchema.optional(),
 });
 
 export const joinSessionSchema = z.object({
@@ -41,4 +58,6 @@ export const submitHeadlineSchema = z.object({
 export type CreateSessionBody = z.infer<typeof createSessionSchema>;
 export type JoinSessionBody = z.infer<typeof joinSessionSchema>;
 export type SubmitHeadlineBody = z.infer<typeof submitHeadlineSchema>;
+export type AiPlayerConfigBody = z.infer<typeof aiPlayerConfigSchema>;
+export type LlmConfigBody = z.infer<typeof llmConfigSchema>;
 

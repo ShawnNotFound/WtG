@@ -65,15 +65,20 @@ There is no root README; this document is the entry point.
 
 # Running it locally
 
-**Prerequisites:** Node 20+, a PostgreSQL database (local or a NeonDB URL), and an OpenAI API key.
+**Prerequisites:** Node 20+, a PostgreSQL database (local or a NeonDB URL), and an OpenAI or DeepSeek API key.
 
 **1. Backend env** -- create `backend/.env` (placeholders shown; never commit real secrets):
 
 ```
 DATABASE_URL=postgres://USER:PASS@HOST:5432/DBNAME
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-5.2              # optional, this is the default
+OPENAI_MODEL=gpt-5.5              # optional, this is the OpenAI default
 OPENAI_BASE_URL=https://api.openai.com   # optional
+ADMIN_PASSWORD=password           # /code/admin login; default is password
 PORT=3001                        # optional
 FRONTEND_URL=http://localhost:5173       # optional, used for CORS
 GAME_TEST_MODE=false             # set true to compress all timings by 1/16
@@ -252,7 +257,7 @@ durations. Round speed ratios come from `computeRoundSpeedRatio()`.
 ## LLM integration
 
 - **`llm/openaiResponsesClient.ts`** -- thin wrapper over the OpenAI Responses API; enforces a JSON schema for
-  structured output; model from `OPENAI_MODEL` (default `gpt-5.2`).
+  structured output; model from `OPENAI_MODEL` (default `gpt-5.5`).
 - **`game/jurorService.ts`** + **`llm/jurorPrompt.ts`** -- the juror. Output schema: `PLAUSIBILITY`
   {band, label, rationale}, `PLANETS` (top-3 with rank + rationale), `LINKED` (exactly 3, STRONG/WEAK +
   rationale), `HEADLINES` (band1..band5 variants). Validated strictly (exactly 3 linked / 3 planets).
@@ -261,6 +266,11 @@ durations. Round speed ratios come from `computeRoundSpeedRatio()`.
   **10 / 35 / 40 / 12 / 3** (%), i.e. band 3 "plausible" is most likely.
 - **`game/summaryService.ts`** + **`llm/summaryPrompt.ts`** (round recap) and **`llm/narrativePrompt.ts`**
   (end-of-game first-person reports). Both **exclude Archive/seed headlines**.
+- **`world/worldStatePrompt.ts`** + **`world/worldStateService.ts`** -- the world-state assistant and graph
+  updater. The global prompt for initial DAG construction and headline-driven updates is stored in
+  `backend/src/world/worldStatePrompt.ts`. It builds an actor-entity graph from seed case history and starts
+  each accepted headline update immediately in parallel; old queued jobs are resumed as parallel jobs on
+  backend startup.
 
 ## Planets and seeds
 
@@ -282,7 +292,8 @@ All paths are under `frontend/src/`.
 
 - **`main.tsx`** -- React 18 entry, wraps `App` in `BrowserRouter`.
 - **`App.tsx`** -- routes: `/` (create session), `/join/:joinCode` (`pages/JoinByLinkPage.tsx`, accept an invite
-  link), `/lobby/:joinCode` (host or join lobby). Persists `{joinCode, playerId, isHost}` in `localStorage`,
+  link), `/lobby/:joinCode` (host or join lobby), and `/code/admin` (password-gated admin dashboard). Persists
+  `{joinCode, playerId, isHost}` in `localStorage`,
   makes the REST calls (with a rejoin fallback when a started game blocks a normal join), wires up `useSocket`,
   and renders by phase.
 - **`vite.config.ts`** -- dev proxy of `/api` + `/socket.io` to `:3001`. **`vercel.json`** -- SPA rewrite.
@@ -373,6 +384,9 @@ Key tables (see `backend/db/migrations/`):
   planets, `linked_headlines` (JSONB), the full scoring breakdown, `in_game_submitted_at`, and LLM
   request/response logs.
 - **`round_summaries`** -- generated recaps / narrative (status + JSONB payload + `summary_type`).
+- **`world_state_nodes`**, **`world_state_edges`**, **`world_state_jobs`** -- session-local actor-entity
+  world-state DAG, directed relationships, and durable async processing status. Nodes include `times_updated`;
+  jobs record direct/cascade affected nodes for admin-panel highlighting.
 - **`schema_migrations`** -- which migrations have run.
 
 **Migrations 001-014** (one line each):
@@ -393,6 +407,9 @@ Key tables (see `backend/db/migrations/`):
 | 012_round_format | defaults: 8 play minutes, 4 rounds |
 | 013_summary_type | `summary_type` (recap vs narrative) |
 | 014_planet_usage_global | `game_sessions.planet_usage_global` for band-based scoring |
+| 015_ai_players | AI player flags/config on `session_players` |
+| 016_session_llm_config | per-session LLM provider/model/base URL |
+| 017_world_state | world-state nodes, edges, jobs, and `world_state_config` |
 
 # Testing
 
@@ -436,7 +453,7 @@ Run with `npm test` (or `npm run test:watch`) from `backend/`. The frontend curr
 | Round count, play/break minutes, round speed ramp | `backend/src/game/gameLoop.ts` (`BREAK_SCHEDULE`, durations, `ROUND_SPEED_WEIGHTS`) |
 | How many past headlines the juror sees | `backend/src/socket/lobbyHandlers.ts` -> `JUROR_HISTORY_WINDOW` |
 | Juror / summary / narrative prompts | `backend/src/llm/jurorPrompt.ts`, `summaryPrompt.ts`, `narrativePrompt.ts` |
-| LLM model | `OPENAI_MODEL` env var (default `gpt-5.2`) |
+| LLM model | `OPENAI_MODEL` env var (default `gpt-5.5`) |
 | Planets, descriptions, keywords, colours | `backend/src/game/planets.ts` + `frontend/src/lib/planets.ts` |
 | The seed (Archive) headlines | `backend/src/game/seedHeadlines.ts` |
 | Headline typography by band | `frontend/src/components/HeadlineFeed.tsx` -> `BAND_TEXT` |

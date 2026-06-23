@@ -10,6 +10,7 @@
     "format": "prettier --write \"src/**/*.{ts,tsx}\""
   },
   "dependencies": {
+    "@xyflow/react": "^12.11.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
     "react": "^18.2.0",

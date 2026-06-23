@@ -5,8 +5,11 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import sessionsRouter from './routes/sessions.js';
 import jurorRouter from './routes/juror.js';
+import adminRouter from './routes/admin.js';
 import { setupLobbyHandlers } from './socket/lobbyHandlers.js';
 import { gameLoopManager } from './game/gameLoop.js';
+import { aiPlayerManager } from './ai/aiPlayerManager.js';
+import { worldStateProcessor } from './world/worldStateService.js';
 
 dotenv.config();
 
@@ -36,10 +39,19 @@ app.get('/health', (_req, res) => {
 // api routes
 app.use('/api', sessionsRouter);
 app.use('/api/juror', jurorRouter);
+app.use('/api/admin', adminRouter);
 
 gameLoopManager.setSocketIO(io);
 
 setupLobbyHandlers(io);
+
+worldStateProcessor.startQueuedJobs().then((count) => {
+  if (count > 0) {
+    console.log(`[WorldState] Resumed ${count} queued jobs in parallel`);
+  }
+}).catch((error) => {
+  console.error('[WorldState] Failed to resume queued jobs:', error);
+});
 
 // error handling middleware
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -56,6 +68,7 @@ httpServer.listen(PORT, () => {
 // graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
+  aiPlayerManager.stopAll();
   gameLoopManager.stopAll();
   httpServer.close(() => {
     console.log('HTTP server closed');
@@ -65,6 +78,7 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   console.log('SIGINT signal received: closing HTTP server');
+  aiPlayerManager.stopAll();
   gameLoopManager.stopAll();
   httpServer.close(() => {
     console.log('HTTP server closed');

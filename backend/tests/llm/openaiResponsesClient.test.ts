@@ -259,7 +259,7 @@ describe('OpenAI Responses API Client', () => {
       );
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-      expect(callBody.model).toBe('gpt-5.2');
+      expect(callBody.model).toBe('gpt-5.5');
     });
   });
 });

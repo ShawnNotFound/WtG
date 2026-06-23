@@ -19,9 +19,11 @@ interface GameLayoutProps {
   players: any[];
   currentPlayerId: string;
   phase: string;
+  isPaused?: boolean;
   currentRound: number;
   maxRounds: number;
   phaseEndsAt: string | null;
+  pauseRemainingMs?: number | null;
   serverNow: string;
   inGameNow: string | null;
   timelineSpeedRatio: number;
@@ -43,9 +45,11 @@ export function GameLayout({
   players,
   currentPlayerId,
   phase,
+  isPaused = false,
   currentRound,
   maxRounds,
   phaseEndsAt,
+  pauseRemainingMs = null,
   serverNow,
   inGameNow,
   timelineSpeedRatio,
@@ -68,7 +72,7 @@ export function GameLayout({
     inGameNow,
     serverNow,
     timelineSpeedRatio,
-    enabled: phase === 'PLAYING',
+    enabled: phase === 'PLAYING' && !isPaused,
   });
 
   return (
@@ -94,9 +98,11 @@ export function GameLayout({
             <div className="flex-1 flex justify-center">
               <GameStatus
                 phase={phase}
+                isPaused={isPaused}
                 currentRound={currentRound}
                 maxRounds={maxRounds}
                 phaseEndsAt={phaseEndsAt}
+                pauseRemainingMs={pauseRemainingMs}
                 serverNow={serverNow}
                 inGameNow={inGameNow}
               />
@@ -173,7 +179,7 @@ export function GameLayout({
               )}
               {phase === 'PLAYING' && (
                 <div className="shrink-0 pt-3 pb-[env(safe-area-inset-bottom)]">
-                  <HeadlineInput onSubmit={onSubmitHeadline} phase={phase} />
+                  <HeadlineInput onSubmit={onSubmitHeadline} phase={phase} disabled={isPaused} />
                 </div>
               )}
             </section>
@@ -217,6 +223,7 @@ export function GameLayout({
                 <HeadlineInput
                   onSubmit={onSubmitHeadline}
                   phase={phase}
+                  disabled={isPaused}
                 />
               </div>
             )}

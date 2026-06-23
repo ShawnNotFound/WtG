@@ -3,21 +3,30 @@ import { Badge } from './ui';
 
 interface GameStatusProps {
   phase: string;
+  isPaused?: boolean;
   currentRound: number;
   maxRounds: number;
   phaseEndsAt: string | null;
+  pauseRemainingMs?: number | null;
   serverNow: string;
   inGameNow: string | null;
 }
 
 export function GameStatus({
   phase,
+  isPaused = false,
   currentRound,
   maxRounds,
   phaseEndsAt,
+  pauseRemainingMs = null,
   serverNow,
 }: GameStatusProps) {
-  const { remainingFormatted } = usePhaseTimer({ phaseEndsAt, serverNow });
+  const { remainingFormatted } = usePhaseTimer({
+    phaseEndsAt,
+    serverNow,
+    isPaused,
+    pauseRemainingMs,
+  });
 
   const getPhaseLabel = () => {
     switch (phase) {
@@ -40,7 +49,9 @@ export function GameStatus({
 
   return (
     <div className="flex items-center gap-3 flex-wrap">
-      <Badge variant={phaseLabel.variant}>{phaseLabel.text}</Badge>
+      <Badge variant={isPaused ? 'yellow' : phaseLabel.variant}>
+        {isPaused ? `Paused ${phaseLabel.text}` : phaseLabel.text}
+      </Badge>
 
       {(phase === 'PLAYING' || phase === 'BREAK') && currentRound > 0 && (
         <>

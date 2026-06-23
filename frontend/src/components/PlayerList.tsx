@@ -4,6 +4,7 @@ interface Player {
   id: string;
   nickname: string;
   isHost: boolean;
+  isAi?: boolean;
   joinedAt: string;
   totalScore?: number;
 }
@@ -43,6 +44,7 @@ export function PlayerList({ players, currentPlayerId, compact = false }: Player
                     {isYou && <span className="text-gray-400 font-normal ml-1">(You)</span>}
                   </span>
                   {player.isHost && <Badge variant="yellow">Host</Badge>}
+                  {player.isAi && <Badge variant="purple">AI</Badge>}
                 </div>
                 <span className="text-xs font-medium text-gray-500 tabular-nums shrink-0 ml-2">
                   {player.totalScore ?? 0} pts

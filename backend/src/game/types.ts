@@ -25,6 +25,10 @@ export interface GameSessionRuntimeState extends GameSessionConfig {
   phaseStartedAt: Date | null;
   phaseEndsAt: Date | null;
   inGameStartAt: Date | null;
+  isPaused: boolean;
+  pausedAt: Date | null;
+  pauseRemainingMs: number | null;
+  pauseTimelineSpeedRatio: number | null;
 }
 
 /**
@@ -48,6 +52,9 @@ export interface GameStateSnapshot {
   maxRounds: number;
   phaseStartedAt: string | null;
   phaseEndsAt: string | null;
+  isPaused: boolean;
+  pausedAt: string | null;
+  pauseRemainingMs: number | null;
   serverNow: string;
   inGameNow: string | null;
   timelineSpeedRatio: number;

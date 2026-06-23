@@ -2,10 +2,12 @@ import { useState, useEffect, useRef } from 'react';
 
 interface UseGameTimeProgressOptions {
   phase: string;
+  isPaused?: boolean;
   currentRound: number;
   maxRounds: number;
   playMinutes: number;
   phaseStartedAt: string | null;
+  pauseRemainingMs?: number | null;
   serverNow: string;
 }
 
@@ -20,10 +22,12 @@ interface UseGameTimeProgressReturn {
  */
 export function useGameTimeProgress({
   phase,
+  isPaused = false,
   currentRound,
   maxRounds,
   playMinutes,
   phaseStartedAt,
+  pauseRemainingMs = null,
   serverNow,
 }: UseGameTimeProgressOptions): UseGameTimeProgressReturn {
   const [currentGameMins, setCurrentGameMins] = useState(0);
@@ -64,7 +68,9 @@ export function useGameTimeProgress({
 
       // add current phase elapsed time if currently playing, capped at play duration
       let currentPhasePlayMins = 0;
-      if (phase === 'PLAYING' && phaseStartedAt) {
+      if (phase === 'PLAYING' && isPaused && pauseRemainingMs !== null) {
+        currentPhasePlayMins = Math.max(0, Math.min(playMinutes, playMinutes - pauseRemainingMs / (60 * 1000)));
+      } else if (phase === 'PLAYING' && phaseStartedAt) {
         const phaseStart = new Date(phaseStartedAt).getTime();
         const now = Date.now() + offsetRef.current;
         const elapsedMs = Math.max(0, now - phaseStart);
@@ -77,7 +83,7 @@ export function useGameTimeProgress({
 
     compute();
 
-    if (phase === 'PLAYING') {
+    if (phase === 'PLAYING' && !isPaused) {
       intervalRef.current = setInterval(compute, 1000);
     }
 
@@ -86,7 +92,7 @@ export function useGameTimeProgress({
         clearInterval(intervalRef.current);
       }
     };
-  }, [phase, currentRound, maxRounds, playMinutes, phaseStartedAt, serverNow]);
+  }, [phase, isPaused, currentRound, maxRounds, playMinutes, phaseStartedAt, pauseRemainingMs, serverNow]);
 
   return {
     totalGameMins,

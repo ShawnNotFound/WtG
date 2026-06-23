@@ -1,0 +1,2 @@
+ALTER TABLE game_sessions
+  ADD COLUMN IF NOT EXISTS llm_config JSONB NOT NULL DEFAULT '{}';

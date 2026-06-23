@@ -9,11 +9,13 @@ interface JoinLobbyProps {
   currentPlayerId: string;
   isHost: boolean;
   phase: string;
+  isPaused?: boolean;
   currentRound: number;
   maxRounds: number;
   playMinutes: number;
   phaseStartedAt: string | null;
   phaseEndsAt: string | null;
+  pauseRemainingMs?: number | null;
   serverNow: string;
   inGameNow: string | null;
   timelineSpeedRatio: number;
@@ -30,11 +32,13 @@ export function JoinLobby({
   currentPlayerId,
   isHost,
   phase,
+  isPaused = false,
   currentRound,
   maxRounds,
   playMinutes,
   phaseStartedAt,
   phaseEndsAt,
+  pauseRemainingMs = null,
   serverNow,
   inGameNow,
   timelineSpeedRatio,
@@ -50,10 +54,12 @@ export function JoinLobby({
 
   const { totalGameMins, currentGameMins } = useGameTimeProgress({
     phase,
+    isPaused,
     currentRound,
     maxRounds,
     playMinutes,
     phaseStartedAt,
+    pauseRemainingMs,
     serverNow,
   });
 
@@ -90,9 +96,11 @@ export function JoinLobby({
       players={players}
       currentPlayerId={currentPlayerId}
       phase={phase}
+      isPaused={isPaused}
       currentRound={currentRound}
       maxRounds={maxRounds}
       phaseEndsAt={phaseEndsAt}
+      pauseRemainingMs={pauseRemainingMs}
       serverNow={serverNow}
       inGameNow={inGameNow}
       timelineSpeedRatio={timelineSpeedRatio}

@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: future-headlines-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: future_headlines
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - future_headlines_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d future_headlines"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  future_headlines_pgdata:

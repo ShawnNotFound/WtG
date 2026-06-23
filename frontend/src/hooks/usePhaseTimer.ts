@@ -3,6 +3,8 @@ import { useState, useEffect, useRef } from 'react';
 interface UsePhaseTimerOptions {
   phaseEndsAt: string | null;
   serverNow: string;
+  isPaused?: boolean;
+  pauseRemainingMs?: number | null;
 }
 
 interface UsePhaseTimerReturn {
@@ -17,6 +19,8 @@ interface UsePhaseTimerReturn {
 export function usePhaseTimer({
   phaseEndsAt,
   serverNow,
+  isPaused = false,
+  pauseRemainingMs = null,
 }: UsePhaseTimerOptions): UsePhaseTimerReturn {
   const [remainingMs, setRemainingMs] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -25,6 +29,11 @@ export function usePhaseTimer({
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
+    }
+
+    if (isPaused) {
+      setRemainingMs(Math.max(0, pauseRemainingMs ?? 0));
+      return;
     }
 
     if (!phaseEndsAt) {
@@ -59,7 +68,7 @@ export function usePhaseTimer({
         clearInterval(intervalRef.current);
       }
     };
-  }, [phaseEndsAt, serverNow]);
+  }, [phaseEndsAt, serverNow, isPaused, pauseRemainingMs]);
 
   const remainingFormatted = formatTime(remainingMs);
 

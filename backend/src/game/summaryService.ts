@@ -5,10 +5,14 @@
 
 import pool from '../db/pool.js';
 import {
-  createOpenAIClient,
-  OpenAIClient,
   OpenAIError,
 } from '../llm/openaiResponsesClient.js';
+import {
+  createJsonModelClient,
+  getJsonProviderConfig,
+  JsonModelClient,
+} from '../llm/jsonModelClient.js';
+import { getSessionLlmSelection } from '../llm/sessionLlmConfig.js';
 import {
   buildSummaryPrompt,
   buildSummaryInstructions,
@@ -39,30 +43,32 @@ const PLAUSIBILITY_LABELS: Record<number, string> = {
 };
 
 /** singleton client instance */
-let clientInstance: OpenAIClient | null = null;
+let clientInstance: JsonModelClient | null = null;
 
 /**
- * get or create the openai client.
+ * get or create the LLM client.
  * uses environment variables for configuration.
  */
-function getClient(): OpenAIClient {
-  if (!clientInstance) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new OpenAIError(
-        'OPENAI_API_KEY environment variable is not set',
-        'MISSING_API_KEY'
-      );
-    }
-
-    clientInstance = createOpenAIClient({
-      apiKey,
-      model: process.env.OPENAI_MODEL || 'gpt-5.2',
-      baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com',
-    });
+async function getClient(sessionId?: string): Promise<JsonModelClient> {
+  if (clientInstance) {
+    return clientInstance;
   }
 
-  return clientInstance;
+  const selection = sessionId ? await getSessionLlmSelection(sessionId) : undefined;
+  const config = getJsonProviderConfig('SUMMARY', selection);
+  if (!config.apiKey) {
+    throw new OpenAIError(
+      `${config.provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'OPENAI_API_KEY'} environment variable is not set`,
+      'MISSING_API_KEY'
+    );
+  }
+
+  if (!sessionId) {
+    clientInstance = createJsonModelClient(config);
+    return clientInstance;
+  }
+
+  return createJsonModelClient(config);
 }
 
 /**
@@ -75,7 +81,7 @@ export function resetSummaryClient(): void {
 /**
  * set a custom client instance (for testing).
  */
-export function setSummaryClient(client: OpenAIClient): void {
+export function setSummaryClient(client: JsonModelClient): void {
   clientInstance = client;
 }
 
@@ -209,7 +215,7 @@ export async function generateRoundSummary(
     });
     const instructions = buildSummaryInstructions();
 
-    const client = getClient();
+    const client = await getClient(sessionId);
     const result = await client.callResponsesApi<RoundSummaryOutput>({
       input: prompt,
       instructions,
@@ -286,7 +292,7 @@ export async function generateFinalNarrativeSummary(
     const prompt = buildNarrativePrompt({ headlines });
     const instructions = buildNarrativeInstructions();
 
-    const client = getClient();
+    const client = await getClient(sessionId);
     const result = await client.callResponsesApi<NarrativeSummaryOutput>({
       input: prompt,
       instructions,

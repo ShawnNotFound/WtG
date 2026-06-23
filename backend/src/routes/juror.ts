@@ -10,6 +10,7 @@ import {
   JurorValidationError,
 } from '../game/jurorService.js';
 import { OpenAIError } from '../llm/openaiResponsesClient.js';
+import { getJsonProviderConfig } from '../llm/jsonModelClient.js';
 
 const router = Router();
 
@@ -45,7 +46,7 @@ type EvaluateRequest = z.infer<typeof evaluateRequestSchema>;
 
 /**
  * POST /juror/evaluate
- * evaluate a story direction using the openai juror.
+ * evaluate a story direction using the configured juror provider.
  */
 router.post('/evaluate', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -119,10 +120,12 @@ router.post('/evaluate', async (req: Request, res: Response): Promise<void> => {
  * health check for the juror service.
  */
 router.get('/health', (_req: Request, res: Response): void => {
-  const hasApiKey = !!process.env.OPENAI_API_KEY;
+  const config = getJsonProviderConfig('JUROR');
+  const hasApiKey = !!config.apiKey;
   res.json({
     status: hasApiKey ? 'ok' : 'missing_api_key',
-    model: process.env.OPENAI_MODEL || 'gpt-5.2',
+    provider: config.provider,
+    model: config.model,
   });
 });
 

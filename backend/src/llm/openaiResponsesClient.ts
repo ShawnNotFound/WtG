@@ -33,6 +33,8 @@ export interface ResponsesApiRequest {
   jsonSchema?: JsonSchemaDefinition;
   /** optional instructions (system message) */
   instructions?: string;
+  /** optional sampling temperature */
+  temperature?: number;
 }
 
 /**
@@ -63,7 +65,7 @@ export class OpenAIError extends Error {
   }
 }
 
-const DEFAULT_MODEL = 'gpt-5.2';
+export const DEFAULT_OPENAI_MODEL = 'gpt-5.5';
 const DEFAULT_BASE_URL = 'https://api.openai.com';
 
 /**
@@ -72,7 +74,7 @@ const DEFAULT_BASE_URL = 'https://api.openai.com';
 export function createOpenAIClient(config: OpenAIClientConfig) {
   const {
     apiKey,
-    model = DEFAULT_MODEL,
+    model = DEFAULT_OPENAI_MODEL,
     baseUrl = DEFAULT_BASE_URL,
     fetchFn = fetch,
   } = config;
@@ -96,6 +98,10 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
 
     if (request.instructions) {
       body.instructions = request.instructions;
+    }
+
+    if (request.temperature !== undefined) {
+      body.temperature = request.temperature;
     }
 
     if (request.jsonSchema) {

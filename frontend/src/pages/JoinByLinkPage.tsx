@@ -15,8 +15,13 @@ export function JoinByLinkPage({ connected, loading, error, onJoinSession }: Joi
   const [localError, setLocalError] = useState('');
 
   const handleJoin = async () => {
-    if (!nickname.trim()) {
+    const trimmedNickname = nickname.trim();
+    if (!trimmedNickname) {
       setLocalError('Please enter a nickname');
+      return;
+    }
+    if (trimmedNickname.length < 3) {
+      setLocalError('Nickname must be at least 3 characters');
       return;
     }
     if (!joinCode) {
@@ -24,7 +29,7 @@ export function JoinByLinkPage({ connected, loading, error, onJoinSession }: Joi
       return;
     }
     setLocalError('');
-    await onJoinSession(joinCode, nickname.trim());
+    await onJoinSession(joinCode, trimmedNickname);
   };
 
   const displayError = localError || error;
@@ -60,6 +65,7 @@ export function JoinByLinkPage({ connected, loading, error, onJoinSession }: Joi
               onChange={(e) => setNickname(e.target.value)}
               placeholder="Enter your nickname"
               className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent bg-gray-50"
+              minLength={3}
               maxLength={20}
               onKeyDown={(e) => e.key === 'Enter' && !loading && handleJoin()}
             />

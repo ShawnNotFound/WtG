@@ -266,6 +266,38 @@ describe('Juror Routes', () => {
   });
 
   describe('GET /api/juror/health', () => {
+    let previousProvider: string | undefined;
+    let previousOpenAIKey: string | undefined;
+    let previousOpenAIModel: string | undefined;
+
+    beforeEach(() => {
+      previousProvider = process.env.LLM_PROVIDER;
+      previousOpenAIKey = process.env.OPENAI_API_KEY;
+      previousOpenAIModel = process.env.OPENAI_MODEL;
+      process.env.LLM_PROVIDER = 'openai';
+      delete process.env.OPENAI_MODEL;
+    });
+
+    afterEach(() => {
+      if (previousProvider === undefined) {
+        delete process.env.LLM_PROVIDER;
+      } else {
+        process.env.LLM_PROVIDER = previousProvider;
+      }
+
+      if (previousOpenAIKey === undefined) {
+        delete process.env.OPENAI_API_KEY;
+      } else {
+        process.env.OPENAI_API_KEY = previousOpenAIKey;
+      }
+
+      if (previousOpenAIModel === undefined) {
+        delete process.env.OPENAI_MODEL;
+      } else {
+        process.env.OPENAI_MODEL = previousOpenAIModel;
+      }
+    });
+
     it('should return ok status when API key is set', async () => {
       process.env.OPENAI_API_KEY = 'test-key';
 
@@ -274,9 +306,7 @@ describe('Juror Routes', () => {
         .expect(200);
 
       expect(response.body.status).toBe('ok');
-      expect(response.body.model).toBe('gpt-5.2');
-
-      delete process.env.OPENAI_API_KEY;
+      expect(response.body.model).toBe('gpt-5.5');
     });
 
     it('should return missing_api_key status when API key is not set', async () => {
@@ -298,9 +328,6 @@ describe('Juror Routes', () => {
         .expect(200);
 
       expect(response.body.model).toBe('gpt-4o');
-
-      delete process.env.OPENAI_API_KEY;
-      delete process.env.OPENAI_MODEL;
     });
   });
 });

@@ -16,6 +16,8 @@ import { evaluateJuror, JurorEvaluationResult } from './jurorService.js';
 import { rollDice, selectHeadline } from './diceRoll.js';
 
 export interface TransformationInput {
+  /** session id for per-game juror provider/model selection */
+  sessionId?: string;
   /** the player's story direction / headline concept */
   storyDirection: string;
   /** existing headlines in the timeline */
@@ -76,6 +78,7 @@ export async function transformHeadline(
 ): Promise<TransformationResult> {
   // call llm juror for evaluation and headline generation
   const jurorResult: JurorEvaluationResult = await evaluateJuror({
+    sessionId: input.sessionId,
     storyDirection: input.storyDirection,
     headlinesList: input.headlinesList,
     planetList: input.planetList,
@@ -124,6 +127,7 @@ export async function transformHeadlineWithRoll(
   const { mapRollToBand } = await import('./diceRoll.js');
 
   const jurorResult: JurorEvaluationResult = await evaluateJuror({
+    sessionId: input.sessionId,
     storyDirection: input.storyDirection,
     headlinesList: input.headlinesList,
     planetList: input.planetList,

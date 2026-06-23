@@ -1,13 +1,17 @@
 /**
- * juror service for evaluating headlines via openai.
- * this module orchestrates the openai call and validates the response.
+ * juror service for evaluating headlines via a JSON-capable LLM provider.
+ * this module orchestrates the model call and validates the response.
  */
 
 import {
-  createOpenAIClient,
-  OpenAIClient,
   OpenAIError,
 } from '../llm/openaiResponsesClient.js';
+import {
+  createJsonModelClient,
+  getJsonProviderConfig,
+  JsonModelClient,
+} from '../llm/jsonModelClient.js';
+import { getSessionLlmSelection } from '../llm/sessionLlmConfig.js';
 import {
   buildJurorPrompt,
   buildJurorInstructions,
@@ -20,6 +24,8 @@ import {
 
 export interface JurorEvaluationRequest extends JurorPromptInput {
   // inherits storyDirection, headlinesList, planetList
+  /** optional session id for per-game LLM provider/model selection */
+  sessionId?: string;
 }
 
 export interface JurorEvaluationResult {
@@ -37,6 +43,7 @@ export interface JurorEvaluationResult {
     storyDirection: string;
     headlinesList: unknown[];
     planetList: unknown[];
+    sessionId?: string;
     instructions: string;
   };
   /** raw response text from llm (for logging) */
@@ -116,30 +123,32 @@ function validateEvaluationOutput(output: JurorEvaluationOutput): void {
 }
 
 /** singleton client instance */
-let clientInstance: OpenAIClient | null = null;
+let clientInstance: JsonModelClient | null = null;
 
 /**
- * get or create the openai client.
+ * get or create the LLM client.
  * uses environment variables for configuration.
  */
-function getClient(): OpenAIClient {
-  if (!clientInstance) {
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new OpenAIError(
-        'OPENAI_API_KEY environment variable is not set',
-        'MISSING_API_KEY'
-      );
-    }
-
-    clientInstance = createOpenAIClient({
-      apiKey,
-      model: process.env.OPENAI_MODEL || 'gpt-5.2',
-      baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com',
-    });
+async function getClient(sessionId?: string): Promise<JsonModelClient> {
+  if (clientInstance) {
+    return clientInstance;
   }
 
-  return clientInstance;
+  const selection = sessionId ? await getSessionLlmSelection(sessionId) : undefined;
+  const config = getJsonProviderConfig('JUROR', selection);
+  if (!config.apiKey) {
+    throw new OpenAIError(
+      `${config.provider === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'OPENAI_API_KEY'} environment variable is not set`,
+      'MISSING_API_KEY'
+    );
+  }
+
+  if (!sessionId) {
+    clientInstance = createJsonModelClient(config);
+    return clientInstance;
+  }
+
+  return createJsonModelClient(config);
 }
 
 /**
@@ -152,7 +161,7 @@ export function resetJurorClient(): void {
 /**
  * set a custom client instance (for testing).
  */
-export function setJurorClient(client: OpenAIClient): void {
+export function setJurorClient(client: JsonModelClient): void {
   clientInstance = client;
 }
 
@@ -167,7 +176,7 @@ export function setJurorClient(client: OpenAIClient): void {
 export async function evaluateJuror(
   request: JurorEvaluationRequest
 ): Promise<JurorEvaluationResult> {
-  const client = getClient();
+  const client = await getClient(request.sessionId);
 
   const prompt = buildJurorPrompt(request);
   const instructions = buildJurorInstructions();
@@ -188,6 +197,7 @@ export async function evaluateJuror(
       storyDirection: request.storyDirection,
       headlinesList: request.headlinesList,
       planetList: request.planetList,
+      sessionId: request.sessionId,
       instructions,
     },
     rawResponse: result.rawText,
