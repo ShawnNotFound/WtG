@@ -1,6 +1,5 @@
 import { Server, Socket } from 'socket.io';
 import pool from '../db/pool.js';
-import { gameLoopManager } from '../game/gameLoop.js';
 import { submitHeadlineSchema } from '../utils/validation.js';
 import { ZodError } from 'zod';
 import { transformHeadline, LinkedHeadline } from '../game/headlineTransformationService.js';
@@ -12,14 +11,12 @@ import {
   migrateGlobalUsage,
   migratePlayerOrdinals,
   computePlanetPanel,
-  randomOrdinals,
-  initialGlobalUsage,
 } from '../game/planetUsage.js';
 import { getRoundSummary, getSessionIdFromJoinCode } from '../game/summaryService.js';
 import { computeInGameNow } from '../game/inGameTime.js';
 import { SEED_HEADLINES } from '../game/seedHeadlines.js';
-import { aiPlayerManager } from '../ai/aiPlayerManager.js';
 import { worldStateProcessor } from '../world/worldStateService.js';
+import { startGameSessionRuntime } from '../game/sessionLifecycle.js';
 import {
   canSubmitHeadline,
   recordHeadlineSubmission,
@@ -415,39 +412,12 @@ export function setupLobbyHandlers(io: Server): void {
           return;
         }
 
-        // initialize the session's global planet usage (all zeros)
-        await pool.query(
-          `UPDATE game_sessions
-           SET planet_usage_global = $1
-           WHERE id = $2 AND (planet_usage_global = '{}' OR planet_usage_global IS NULL)`,
-          [JSON.stringify(initialGlobalUsage(DEFAULT_PLANETS)), sessionState.id]
+        await startGameSessionRuntime(
+          io,
+          sessionState.id,
+          joinCode,
+          sessionState.players.map((player) => player.id)
         );
-
-        // give each player their own stable random planet ordering (tie-break for the usage panel)
-        for (const player of sessionState.players) {
-          await pool.query(
-            `UPDATE session_players
-             SET planet_usage_state = $1
-             WHERE id = $2 AND (planet_usage_state = '{}' OR planet_usage_state IS NULL)`,
-            [JSON.stringify(randomOrdinals(DEFAULT_PLANETS)), player.id]
-          );
-        }
-
-        // insert Archive system player
-        const archiveResult = await pool.query(
-          `INSERT INTO session_players (session_id, nickname, is_host, is_system, planet_usage_state)
-           VALUES ($1, 'Archive', false, true, '{}')
-           RETURNING id`,
-          [sessionState.id]
-        );
-        const archivePlayerId = archiveResult.rows[0].id;
-
-        // start the game via GameLoopManager (seeds will drip-feed during tutorial phase)
-        await gameLoopManager.handleHostStartGame(sessionState.id, joinCode, archivePlayerId);
-        aiPlayerManager.startSession(io, sessionState.id, joinCode);
-        worldStateProcessor.enqueueInitialBuild(sessionState.id).catch((error) => {
-          console.error(`[WorldState ${joinCode}] Initial graph enqueue failed:`, error);
-        });
 
         const updatedState = await getSessionState(joinCode);
 

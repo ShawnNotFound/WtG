@@ -85,7 +85,7 @@ CREATE TRIGGER update_world_state_jobs_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at_column();
 
-COMMENT ON TABLE world_state_nodes IS 'Session-local DAG/entity world state nodes extracted from seed history and submitted headlines.';
+COMMENT ON TABLE world_state_nodes IS 'Session-local actor-entity world graph nodes extracted from seed history and submitted headlines.';
 COMMENT ON COLUMN world_state_nodes.times_updated IS 'Number of headline/world-model updates that touched this node after creation.';
-COMMENT ON TABLE world_state_edges IS 'Directed relationships between world state nodes. The service avoids adding edges that would create cycles.';
+COMMENT ON TABLE world_state_edges IS 'Directed relationships between world state nodes.';
 COMMENT ON TABLE world_state_jobs IS 'Durable queue/status table for asynchronous world-state graph construction and headline update processing.';

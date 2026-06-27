@@ -14,6 +14,7 @@ interface GameEndProps {
   currentGameMins: number;
   finalSummary: FinalSummary | null;
   onBack: () => void;
+  backLabel?: string;
 }
 
 export function GameEnd({
@@ -26,6 +27,7 @@ export function GameEnd({
   currentGameMins,
   finalSummary,
   onBack,
+  backLabel = 'Leave game',
 }: GameEndProps) {
   const realPlayers = players.filter((p) => p.nickname !== 'Archive');
   const realHeadlines = headlines;
@@ -306,7 +308,7 @@ export function GameEnd({
             {generatingPdf ? 'Generating PDF...' : 'Download PDF'}
           </Button>
           <Button variant="secondary" onClick={onBack}>
-            Leave game
+            {backLabel}
           </Button>
         </div>
       </div>

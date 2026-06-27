@@ -4,6 +4,8 @@ import { HostLobby } from './components/HostLobby';
 import { JoinLobby } from './components/JoinLobby';
 import { JoinByLinkPage } from './pages/JoinByLinkPage';
 import { AdminPage } from './pages/AdminPage';
+import { AdminSummaryPage } from './pages/AdminSummaryPage';
+import { EvaluationPage } from './pages/EvaluationPage';
 import { useSocket } from './hooks/useSocket';
 import { Card, Button, DropdownSelect } from './components/ui';
 import {
@@ -84,7 +86,7 @@ function App() {
         // skip auto-rejoin on routes that should not be hijacked by an old lobby session
         const currentPath = window.location.pathname;
         const isJoinPage = currentPath.startsWith('/join/');
-        const isAdminPage = currentPath === '/admin' || currentPath === '/code/admin';
+        const isAdminPage = currentPath.startsWith('/admin') || currentPath === '/code/admin';
         if (!isJoinPage && !isAdminPage && parsed.joinCode && parsed.playerId) {
           setSessionData(parsed);
           joinLobby(parsed.joinCode, parsed.playerId);
@@ -367,6 +369,8 @@ function App() {
   return (
     <Routes>
       <Route path="/admin" element={<AdminPage />} />
+      <Route path="/admin/evaluations" element={<EvaluationPage />} />
+      <Route path="/admin/summary/:joinCode" element={<AdminSummaryPage />} />
       <Route path="/code/admin" element={<Navigate to="/admin" replace />} />
       <Route path="/" element={
         <div className="h-[100dvh] overflow-y-auto bg-gradient-to-b from-gray-50 to-gray-100/80 p-4 sm:p-6">

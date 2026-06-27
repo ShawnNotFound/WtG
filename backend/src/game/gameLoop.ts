@@ -11,6 +11,7 @@ import { DEFAULT_PLANETS } from './scoringTypes.js';
 import { generateRoundSummary, generateFinalNarrativeSummary } from './summaryService.js';
 import { getPlayerScoreBreakdowns } from './scoringService.js';
 import { SEED_HEADLINES } from './seedHeadlines.js';
+import { aiPlayerManager } from '../ai/aiPlayerManager.js';
 
 /**
  * test mode: when GAME_TEST_MODE=true, all time-based durations
@@ -41,6 +42,11 @@ interface BreakConfig {
   durationMin: number;
   generateSummary: boolean;
   summaryFromRound: number | null; // inclusive; null means no summary
+}
+
+interface SessionSummaryConfig {
+  roundSummaries: boolean;
+  finalNarrative: boolean;
 }
 
 const BREAK_SCHEDULE: BreakConfig[] = [
@@ -188,6 +194,11 @@ class GameLoopInstance {
   ): Promise<void> {
     const fromPhase = this.state.phase;
     const roundNo = newRound !== undefined ? newRound : this.state.currentRound;
+    const shouldHoldAi = fromPhase === 'PLAYING' && toPhase !== 'PLAYING';
+    const outgoingPhaseDueAt = this.state.phaseEndsAt
+      ? new Date(this.state.phaseEndsAt)
+      : new Date();
+    let aiTransitionHold = false;
 
     console.log(
       `[GameLoop ${this.state.joinCode}] Transitioning: ${fromPhase} → ${toPhase} (round ${roundNo})`
@@ -198,15 +209,40 @@ class GameLoopInstance {
       this.timerHandle = null;
     }
 
+    try {
+      if (shouldHoldAi) {
+        const workState = aiPlayerManager.holdSessionForTransition(this.state.sessionId);
+        aiTransitionHold = workState.known;
+
+        if (workState.activeJobs > 0) {
+          console.log(
+            `[GameLoop ${this.state.joinCode}] Waiting for ${workState.activeJobs} AI job(s) before ${toPhase}`
+          );
+          await aiPlayerManager.waitForSessionIdle(this.state.sessionId);
+          console.log(`[GameLoop ${this.state.joinCode}] AI jobs settled; continuing transition to ${toPhase}`);
+        }
+
+        if (this.state.isPaused || this.state.phase !== fromPhase) {
+          console.log(
+            `[GameLoop ${this.state.joinCode}] Transition to ${toPhase} deferred because phase state changed while waiting for AI`
+          );
+          return;
+        }
+      }
+
     // calculate timing for new phase
     const now = new Date();
+    const outgoingTimeAt =
+      shouldHoldAi && outgoingPhaseDueAt.getTime() < now.getTime()
+        ? outgoingPhaseDueAt
+        : now;
     let phaseStartedAt = now;
     let phaseEndsAt: Date | null = null;
     let inGameStartAt = this.state.inGameStartAt;
 
     // accumulate in-game time from the outgoing phase before resetting phaseStartedAt
     if (inGameStartAt && this.state.phaseStartedAt) {
-      const realElapsed = now.getTime() - this.state.phaseStartedAt.getTime();
+      const realElapsed = outgoingTimeAt.getTime() - this.state.phaseStartedAt.getTime();
       const inGameElapsed = realElapsed * this.state.timelineSpeedRatio;
       inGameStartAt = new Date(inGameStartAt.getTime() + inGameElapsed);
     }
@@ -263,7 +299,7 @@ class GameLoopInstance {
     }
 
     // generate round summary on break transition (only if this break has one)
-    if (toPhase === 'BREAK') {
+    if (toPhase === 'BREAK' && await this.shouldGenerateRoundSummaries()) {
       const breakCfg = getBreakConfig(roundNo);
       if (breakCfg.generateSummary && breakCfg.summaryFromRound !== null) {
         this.generateAndBroadcastSummary(roundNo, breakCfg.summaryFromRound).catch((err) => {
@@ -276,7 +312,7 @@ class GameLoopInstance {
     }
 
     // generate final narrative summary on transition to finished
-    if (toPhase === 'FINISHED' && fromPhase !== 'FINISHED') {
+    if (toPhase === 'FINISHED' && fromPhase !== 'FINISHED' && await this.shouldGenerateFinalNarrative()) {
       this.generateAndBroadcastFinalNarrative().catch((err) => {
         console.error(
           `[GameLoop ${this.state.joinCode}] Final narrative summary generation failed:`,
@@ -286,6 +322,11 @@ class GameLoopInstance {
     }
 
     this.scheduleNextTransition(now);
+    } finally {
+      if (aiTransitionHold) {
+        aiPlayerManager.releaseSessionTransitionHold(this.state.sessionId);
+      }
+    }
   }
 
   private computeNextPhase(
@@ -571,6 +612,28 @@ class GameLoopInstance {
     }
   }
 
+  private async getSummaryConfig(): Promise<SessionSummaryConfig> {
+    const result = await pool.query(
+      `SELECT summary_config FROM game_sessions WHERE id = $1`,
+      [this.state.sessionId]
+    );
+    const raw = result.rows[0]?.summary_config;
+    const config = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+
+    return {
+      roundSummaries: config.roundSummaries !== false,
+      finalNarrative: config.finalNarrative !== false,
+    };
+  }
+
+  private async shouldGenerateRoundSummaries(): Promise<boolean> {
+    return (await this.getSummaryConfig()).roundSummaries;
+  }
+
+  private async shouldGenerateFinalNarrative(): Promise<boolean> {
+    return (await this.getSummaryConfig()).finalNarrative;
+  }
+
   private async loadArchiveSeedState(): Promise<void> {
     const archiveResult = await pool.query(
       `SELECT id
@@ -775,6 +838,10 @@ class GameLoopInstance {
     await this.loadFromDatabase();
 
     if (!this.state.isPaused) {
+      if (this.state.phase === 'TUTORIAL') {
+        await this.loadArchiveSeedState();
+        this.startSeedDrip();
+      }
       this.scheduleNextTransition();
       await this.broadcastGameState();
       return;
@@ -845,6 +912,13 @@ class GameLoopManager {
 
   setSocketIO(io: Server): void {
     this.io = io;
+  }
+
+  getSocketIO(): Server {
+    if (!this.io) {
+      throw new Error('Socket.IO server not initialized in GameLoopManager');
+    }
+    return this.io;
   }
 
   async ensureLoopForSession(

@@ -22,6 +22,7 @@ import {
   defaultModelForProvider,
   modelOptionsForValue,
 } from '../lib/modelOptions';
+import { useNavigate } from 'react-router-dom';
 
 const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 
@@ -77,6 +78,29 @@ interface WorldEdge {
   updatedAt: string;
 }
 
+interface WorldReaction {
+  id: string;
+  headlineId: string | null;
+  nodeId: string | null;
+  nodeName: string;
+  sourceNodeId: string | null;
+  sourceNodeName: string | null;
+  sourceEventId: string;
+  eventId: string;
+  depth: number;
+  status: 'affected' | 'unaffected' | 'skipped' | 'error';
+  confidence: number | null;
+  rationale: string | null;
+  stateDelta: string | null;
+  updatedSummary: string | null;
+  emittedEvents: unknown[];
+  proposedEdges: unknown[];
+  model: string | null;
+  usage: Record<string, unknown>;
+  error: string | null;
+  createdAt: string;
+}
+
 interface WorldJob {
   id: string;
   headlineId: string | null;
@@ -86,6 +110,7 @@ interface WorldJob {
   agent: string;
   headlineText: string | null;
   result: Record<string, unknown>;
+  reactions?: WorldReaction[];
   error: string | null;
   createdAt: string;
   startedAt?: string | null;
@@ -128,6 +153,12 @@ interface WorldStateResponse {
     };
     worldStateConfig?: {
       enabled?: boolean;
+      allowCycles?: boolean;
+      maxPropagationDepth?: number;
+      maxNodeReactions?: number;
+      maxEventsPerNode?: number;
+      nodeAgentConcurrency?: number;
+      storeUnaffectedDecisions?: boolean;
     };
     players: AdminPlayer[];
   };
@@ -162,6 +193,12 @@ interface ConfigDraft {
   maxRounds: string;
   timelineSpeedRatio: string;
   worldStateEnabled: boolean;
+  allowCycles: boolean;
+  maxPropagationDepth: string;
+  maxNodeReactions: string;
+  maxEventsPerNode: string;
+  nodeAgentConcurrency: string;
+  storeUnaffectedDecisions: boolean;
   provider: AiProvider;
   model: string;
   baseUrl: string;
@@ -174,6 +211,7 @@ function normalizeProvider(value: unknown): AiProvider {
 
 function draftFromState(state: WorldStateResponse): ConfigDraft {
   const provider = normalizeProvider(state.session.llmConfig?.provider);
+  const worldStateConfig = state.session.worldStateConfig ?? {};
   const aiPlayers: Record<string, AiDraft> = {};
 
   for (const player of state.session.players.filter((p) => p.isAi)) {
@@ -193,7 +231,13 @@ function draftFromState(state: WorldStateResponse): ConfigDraft {
     breakMinutes: String(state.session.breakMinutes),
     maxRounds: String(state.session.maxRounds),
     timelineSpeedRatio: String(state.session.timelineSpeedRatio),
-    worldStateEnabled: state.session.worldStateConfig?.enabled !== false,
+    worldStateEnabled: worldStateConfig.enabled !== false,
+    allowCycles: worldStateConfig.allowCycles !== false,
+    maxPropagationDepth: String(worldStateConfig.maxPropagationDepth ?? 2),
+    maxNodeReactions: String(worldStateConfig.maxNodeReactions ?? 20),
+    maxEventsPerNode: String(worldStateConfig.maxEventsPerNode ?? 2),
+    nodeAgentConcurrency: String(worldStateConfig.nodeAgentConcurrency ?? 4),
+    storeUnaffectedDecisions: worldStateConfig.storeUnaffectedDecisions !== false,
     provider,
     model: state.session.llmConfig?.model ?? defaultModelForProvider(provider),
     baseUrl: state.session.llmConfig?.baseUrl ?? baseUrlForProvider(provider),
@@ -225,6 +269,20 @@ function stageLabel(stage: string): string {
     building_initial_actor_graph: 'Building initial actor graph',
     waiting_for_initial_actor_graph: 'Waiting for initial actor graph',
     persisting_initial_graph: 'Persisting initial graph',
+    headline_intake_agent: 'Headline intake agent',
+    persisting_intake_plan: 'Persisting intake plan',
+    creating_new_actor_nodes: 'Creating new actor nodes',
+    updating_initial_relationships: 'Updating initial relationships',
+    entity_agent_direct_wave: 'Direct entity-agent wave',
+    entity_agent_propagation_wave_1: 'Propagation wave 1',
+    entity_agent_propagation_wave_2: 'Propagation wave 2',
+    entity_agent_propagation_wave_3: 'Propagation wave 3',
+    entity_agent_propagation_wave_4: 'Propagation wave 4',
+    entity_agent_propagation_wave_5: 'Propagation wave 5',
+    entity_agent_propagation_wave_6: 'Propagation wave 6',
+    entity_agent_propagation_wave_7: 'Propagation wave 7',
+    entity_agent_propagation_wave_8: 'Propagation wave 8',
+    propagation_capped: 'Propagation capped',
     checking_new_entity_nodes: 'Checking new entity nodes',
     updating_direct_and_cascade_nodes: 'Planning direct and cascade updates',
     creating_new_entity_nodes: 'Creating new entity nodes',
@@ -270,6 +328,12 @@ function collectNodeHighlights(nodes: WorldNode[], jobs: WorldJob[]): Map<string
     for (const name of names?.direct ?? []) add(undefined, name, 1);
     for (const name of names?.cascade ?? []) add(undefined, name, 2);
     for (const name of names?.related ?? []) add(undefined, name, 3);
+
+    for (const reaction of job.reactions ?? []) {
+      if (reaction.status === 'affected') {
+        add(reaction.nodeId ?? undefined, reaction.nodeName, coerceDepth(reaction.depth + 1));
+      }
+    }
   }
 
   return highlights;
@@ -974,6 +1038,62 @@ function JobDetail({ job }: { job: WorldJob | undefined }) {
           </div>
         </div>
       )}
+      {(job.reactions?.length ?? 0) > 0 && (
+        <div>
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-semibold uppercase tracking-wider text-gray-400">Node reactions</div>
+            <Badge variant="default">{job.reactions?.length ?? 0}</Badge>
+          </div>
+          <div className="mt-2 max-h-72 space-y-2 overflow-y-auto pr-1">
+            {(job.reactions ?? []).map((reaction) => (
+              <div key={reaction.id} className="rounded-lg border border-gray-100 bg-gray-50 p-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0 text-sm font-medium text-gray-900">
+                    {reaction.nodeName}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Badge
+                      variant={
+                        reaction.status === 'affected'
+                          ? 'green'
+                          : reaction.status === 'error'
+                            ? 'red'
+                            : reaction.status === 'skipped'
+                              ? 'yellow'
+                              : 'default'
+                      }
+                    >
+                      {reaction.status}
+                    </Badge>
+                    <Badge variant="purple">d{reaction.depth}</Badge>
+                  </div>
+                </div>
+                <div className="mt-1 text-xs text-gray-400">
+                  {reaction.sourceNodeName ? `${reaction.sourceNodeName} -> ` : 'headline -> '}
+                  {reaction.nodeName}
+                  {reaction.confidence !== null && reaction.confidence !== undefined
+                    ? ` / confidence ${Number(reaction.confidence).toFixed(2)}`
+                    : ''}
+                </div>
+                {reaction.stateDelta && (
+                  <p className="mt-2 text-xs leading-5 text-gray-700">{reaction.stateDelta}</p>
+                )}
+                {reaction.rationale && (
+                  <p className="mt-1 text-xs leading-5 text-gray-500">{reaction.rationale}</p>
+                )}
+                {Array.isArray(reaction.emittedEvents) && reaction.emittedEvents.length > 0 && (
+                  <div className="mt-2 text-xs text-gray-400">
+                    emitted {reaction.emittedEvents.length} event{reaction.emittedEvents.length === 1 ? '' : 's'}
+                  </div>
+                )}
+                {reaction.error && (
+                  <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-600">{reaction.error}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {job.error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">{job.error}</div>}
       <div>
         <div className="text-xs font-semibold uppercase tracking-wider text-gray-400">Result data</div>
@@ -986,6 +1106,7 @@ function JobDetail({ job }: { job: WorldJob | undefined }) {
 }
 
 export function AdminPage() {
+  const navigate = useNavigate();
   const [passwordInput, setPasswordInput] = useState('');
   const [password, setPassword] = useState(() => localStorage.getItem('futureHeadlines_adminPassword') ?? '');
   const [sessions, setSessions] = useState<AdminSessionSummary[]>([]);
@@ -1102,6 +1223,14 @@ export function AdminPage() {
           maxRounds: Number(configDraft.maxRounds),
           timelineSpeedRatio: Number(configDraft.timelineSpeedRatio),
           worldStateEnabled: configDraft.worldStateEnabled,
+          worldStateConfig: {
+            allowCycles: configDraft.allowCycles,
+            maxPropagationDepth: Number(configDraft.maxPropagationDepth),
+            maxNodeReactions: Number(configDraft.maxNodeReactions),
+            maxEventsPerNode: Number(configDraft.maxEventsPerNode),
+            nodeAgentConcurrency: Number(configDraft.nodeAgentConcurrency),
+            storeUnaffectedDecisions: configDraft.storeUnaffectedDecisions,
+          },
           llmConfig: {
             provider: configDraft.provider,
             model: configDraft.model,
@@ -1232,9 +1361,19 @@ export function AdminPage() {
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold text-gray-900">Admin</h1>
-            <p className="text-sm text-gray-500">World-state DAG, parallel processing, and game parameters</p>
+            <p className="text-sm text-gray-500">World-state graph, parallel processing, and game parameters</p>
           </div>
           <div className="flex items-center gap-2">
+            <Button variant="secondary" onClick={() => navigate('/admin/evaluations')}>
+              Evaluation Mode
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => selectedJoinCode && navigate(`/admin/summary/${selectedJoinCode}`)}
+              disabled={!selectedJoinCode}
+            >
+              Show Summary Page
+            </Button>
             {worldState && (
               <Button
                 variant={worldState.session.isPaused ? 'secondary' : 'ghost'}
@@ -1407,7 +1546,7 @@ export function AdminPage() {
                   <Card padding="md" className="min-w-0 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">World DAG</h2>
+                        <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">World Graph</h2>
                         <p className="mt-1 text-sm text-gray-500">
                           {selectedJobSnapshot && selectedJob
                             ? `Snapshot after ${selectedJob.kind} job at ${formatTime(selectedJob.updatedAt)}`
@@ -1474,6 +1613,64 @@ export function AdminPage() {
                           className="h-4 w-4"
                         />
                       </label>
+
+                      <div className="space-y-2 rounded-lg border border-gray-100 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">World Graph Propagation</h3>
+                          <label className="flex items-center gap-2 text-xs text-gray-600">
+                            Cycles
+                            <input
+                              type="checkbox"
+                              checked={configDraft.allowCycles}
+                              onChange={(event) => patchDraft({ allowCycles: event.target.checked })}
+                              className="h-4 w-4"
+                            />
+                          </label>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="text-xs text-gray-500">
+                            Max depth
+                            <input
+                              value={configDraft.maxPropagationDepth}
+                              onChange={(event) => patchDraft({ maxPropagationDepth: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Max reactions
+                            <input
+                              value={configDraft.maxNodeReactions}
+                              onChange={(event) => patchDraft({ maxNodeReactions: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Events per node
+                            <input
+                              value={configDraft.maxEventsPerNode}
+                              onChange={(event) => patchDraft({ maxEventsPerNode: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Agent concurrency
+                            <input
+                              value={configDraft.nodeAgentConcurrency}
+                              onChange={(event) => patchDraft({ nodeAgentConcurrency: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                        </div>
+                        <label className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                          Store unaffected decisions
+                          <input
+                            type="checkbox"
+                            checked={configDraft.storeUnaffectedDecisions}
+                            onChange={(event) => patchDraft({ storeUnaffectedDecisions: event.target.checked })}
+                            className="h-4 w-4"
+                          />
+                        </label>
+                      </div>
 
                       <div className="grid grid-cols-2 gap-2">
                         <DropdownSelect

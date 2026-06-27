@@ -6,6 +6,7 @@ import {
   ResponsesApiRequest,
   ResponsesApiResult,
 } from './openaiResponsesClient.js';
+import { getDefaultFetch } from './proxyFetch.js';
 
 export { DEFAULT_OPENAI_MODEL };
 
@@ -56,17 +57,19 @@ function createDeepSeekJsonClient(config: JsonModelClientConfig): JsonModelClien
     apiKey,
     model,
     baseUrl = DEFAULT_DEEPSEEK_BASE_URL,
-    fetchFn = fetch,
+    fetchFn,
   } = config;
 
   if (!apiKey) {
     throw new OpenAIError('DeepSeek API key is required', 'MISSING_API_KEY');
   }
 
+  const effectiveFetch = fetchFn ?? getDefaultFetch();
+
   return {
     async callResponsesApi<T>(request: ResponsesApiRequest): Promise<ResponsesApiResult<T>> {
       const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-      const response = await fetchFn(url, {
+      const response = await effectiveFetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -94,7 +97,11 @@ function createDeepSeekJsonClient(config: JsonModelClientConfig): JsonModelClien
         } catch {
           // keep status-only message
         }
-        throw new OpenAIError(errorMessage, 'API_ERROR', response.status);
+        throw new OpenAIError(
+          `${errorMessage} (model: ${model}, endpoint: ${url})`,
+          'API_ERROR',
+          response.status
+        );
       }
 
       let responseData: any;

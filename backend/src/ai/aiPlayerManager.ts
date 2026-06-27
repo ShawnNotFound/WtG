@@ -18,6 +18,14 @@ interface SessionRuntime {
   handle: NodeJS.Timeout;
   lastSubmittedAt: Map<string, number>;
   inFlight: Set<string>;
+  transitionHold: boolean;
+  idleWaiters: Set<() => void>;
+}
+
+export interface AiSessionWorkState {
+  known: boolean;
+  activeJobs: number;
+  transitionHold: boolean;
 }
 
 interface SessionSnapshot {
@@ -128,6 +136,8 @@ class AiPlayerManager {
       }, 1_000),
       lastSubmittedAt: new Map(),
       inFlight: new Set(),
+      transitionHold: false,
+      idleWaiters: new Set(),
     };
 
     this.sessions.set(sessionId, runtime);
@@ -140,6 +150,7 @@ class AiPlayerManager {
       return;
     }
     clearInterval(runtime.handle);
+    this.notifyIdle(runtime);
     this.sessions.delete(sessionId);
     console.log(`[AI ${runtime.joinCode}] AI player manager stopped`);
   }
@@ -150,9 +161,67 @@ class AiPlayerManager {
     }
   }
 
+  getSessionWorkState(sessionId: string): AiSessionWorkState {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) {
+      return { known: false, activeJobs: 0, transitionHold: false };
+    }
+
+    return {
+      known: true,
+      activeJobs: runtime.inFlight.size,
+      transitionHold: runtime.transitionHold,
+    };
+  }
+
+  holdSessionForTransition(sessionId: string): AiSessionWorkState {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) {
+      return { known: false, activeJobs: 0, transitionHold: false };
+    }
+
+    runtime.transitionHold = true;
+    return this.getSessionWorkState(sessionId);
+  }
+
+  releaseSessionTransitionHold(sessionId: string): void {
+    const runtime = this.sessions.get(sessionId);
+    if (runtime) {
+      runtime.transitionHold = false;
+    }
+  }
+
+  async waitForSessionIdle(sessionId: string): Promise<AiSessionWorkState> {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime || runtime.inFlight.size === 0) {
+      return this.getSessionWorkState(sessionId);
+    }
+
+    await new Promise<void>((resolve) => {
+      runtime.idleWaiters.add(resolve);
+    });
+
+    return this.getSessionWorkState(sessionId);
+  }
+
+  private notifyIdle(runtime: SessionRuntime): void {
+    if (runtime.inFlight.size > 0) {
+      return;
+    }
+
+    for (const resolve of runtime.idleWaiters) {
+      resolve();
+    }
+    runtime.idleWaiters.clear();
+  }
+
   private async tick(sessionId: string): Promise<void> {
     const runtime = this.sessions.get(sessionId);
     if (!runtime) {
+      return;
+    }
+
+    if (runtime.transitionHold) {
       return;
     }
 
@@ -171,6 +240,10 @@ class AiPlayerManager {
       return;
     }
 
+    if (runtime.transitionHold) {
+      return;
+    }
+
     const aiPlayers = await getAiPlayerRows(sessionId);
     if (aiPlayers.length === 0) {
       return;
@@ -180,6 +253,10 @@ class AiPlayerManager {
     const now = Date.now();
 
     for (const player of aiPlayers) {
+      if (runtime.transitionHold) {
+        return;
+      }
+
       const config = normalizeAiPlayerConfig(player.ai_config);
       const last = runtime.lastSubmittedAt.get(player.id) ?? 0;
       const extraIntervalMs = config.submitEverySeconds * 1000;
@@ -188,6 +265,10 @@ class AiPlayerManager {
 
       if (runtime.inFlight.has(player.id) || !cooldown.allowed || !intervalReady) {
         continue;
+      }
+
+      if (runtime.transitionHold) {
+        return;
       }
 
       runtime.inFlight.add(player.id);
@@ -200,6 +281,7 @@ class AiPlayerManager {
         visibleHeadlines,
       }).finally(() => {
         runtime.inFlight.delete(player.id);
+        this.notifyIdle(runtime);
       });
     }
   }

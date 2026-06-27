@@ -267,7 +267,7 @@ durations. Round speed ratios come from `computeRoundSpeedRatio()`.
 - **`game/summaryService.ts`** + **`llm/summaryPrompt.ts`** (round recap) and **`llm/narrativePrompt.ts`**
   (end-of-game first-person reports). Both **exclude Archive/seed headlines**.
 - **`world/worldStatePrompt.ts`** + **`world/worldStateService.ts`** -- the world-state assistant and graph
-  updater. The global prompt for initial DAG construction and headline-driven updates is stored in
+  updater. The global prompt for initial world graph construction and headline-driven updates is stored in
   `backend/src/world/worldStatePrompt.ts`. It builds an actor-entity graph from seed case history and starts
   each accepted headline update immediately in parallel; old queued jobs are resumed as parallel jobs on
   backend startup.
@@ -384,9 +384,9 @@ Key tables (see `backend/db/migrations/`):
   planets, `linked_headlines` (JSONB), the full scoring breakdown, `in_game_submitted_at`, and LLM
   request/response logs.
 - **`round_summaries`** -- generated recaps / narrative (status + JSONB payload + `summary_type`).
-- **`world_state_nodes`**, **`world_state_edges`**, **`world_state_jobs`** -- session-local actor-entity
-  world-state DAG, directed relationships, and durable async processing status. Nodes include `times_updated`;
-  jobs record direct/cascade affected nodes for admin-panel highlighting.
+- **`world_state_nodes`**, **`world_state_edges`**, **`world_state_jobs`**, **`world_state_reactions`** -- session-local
+  cyclic actor-entity world graph, directed relationships, durable async processing status, and per-node
+  reaction traces. Nodes include `times_updated`; jobs and reactions drive admin-panel highlighting.
 - **`schema_migrations`** -- which migrations have run.
 
 **Migrations 001-014** (one line each):

@@ -10,6 +10,7 @@ import { setupLobbyHandlers } from './socket/lobbyHandlers.js';
 import { gameLoopManager } from './game/gameLoop.js';
 import { aiPlayerManager } from './ai/aiPlayerManager.js';
 import { worldStateProcessor } from './world/worldStateService.js';
+import { evaluationCoordinator } from './evaluation/evaluationService.js';
 
 dotenv.config();
 
@@ -51,6 +52,14 @@ worldStateProcessor.startQueuedJobs().then((count) => {
   }
 }).catch((error) => {
   console.error('[WorldState] Failed to resume queued jobs:', error);
+});
+
+evaluationCoordinator.resumeActiveBatches().then((count) => {
+  if (count > 0) {
+    console.log(`[Evaluation] Resumed ${count} active evaluation batch(es)`);
+  }
+}).catch((error) => {
+  console.error('[Evaluation] Failed to resume evaluation batches:', error);
 });
 
 // error handling middleware

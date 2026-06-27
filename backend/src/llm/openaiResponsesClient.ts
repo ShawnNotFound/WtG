@@ -3,6 +3,8 @@
  * uses fetch (injectable for testing) to call the responses api with json schema enforcement.
  */
 
+import { getDefaultFetch } from './proxyFetch.js';
+
 /**
  * configuration for the openai client.
  */
@@ -76,12 +78,14 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
     apiKey,
     model = DEFAULT_OPENAI_MODEL,
     baseUrl = DEFAULT_BASE_URL,
-    fetchFn = fetch,
+    fetchFn,
   } = config;
 
   if (!apiKey) {
     throw new OpenAIError('OPENAI_API_KEY is required', 'MISSING_API_KEY');
   }
+
+  const effectiveFetch = fetchFn ?? getDefaultFetch();
 
   /**
    * call the responses api and return parsed json.
@@ -89,7 +93,7 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
   async function callResponsesApi<T>(
     request: ResponsesApiRequest
   ): Promise<ResponsesApiResult<T>> {
-    const url = `${baseUrl}/v1/responses`;
+    const url = `${baseUrl.replace(/\/+$/, '')}/v1/responses`;
 
     const body: Record<string, unknown> = {
       model,
@@ -117,7 +121,7 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
 
     let response: Response;
     try {
-      response = await fetchFn(url, {
+      response = await effectiveFetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -144,7 +148,11 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
       } catch {
         // ignore json parse errors for error response
       }
-      throw new OpenAIError(errorMessage, 'API_ERROR', response.status);
+      throw new OpenAIError(
+        `${errorMessage} (model: ${model}, endpoint: ${url})`,
+        'API_ERROR',
+        response.status
+      );
     }
 
     let responseData: any;

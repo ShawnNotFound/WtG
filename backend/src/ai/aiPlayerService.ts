@@ -74,12 +74,17 @@ export function normalizeAiPlayerConfig(raw: unknown): AiPlayerConfig {
 function defaultModelForProvider(provider: AiPlayerConfig['provider']): string {
   if (provider === 'deepseek') {
     return process.env.GAME_TEST_MODE === 'true'
-      ? (process.env.AI_PLAYER_TEST_MODEL || process.env.AI_PLAYER_DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL)
+      ? (
+          process.env.AI_PLAYER_TEST_DEEPSEEK_MODEL ||
+          process.env.AI_PLAYER_TEST_MODEL ||
+          process.env.AI_PLAYER_DEEPSEEK_MODEL ||
+          DEFAULT_DEEPSEEK_MODEL
+        )
       : (process.env.AI_PLAYER_DEEPSEEK_MODEL || process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL);
   }
 
   return process.env.GAME_TEST_MODE === 'true'
-    ? (process.env.AI_PLAYER_TEST_MODEL || process.env.AI_PLAYER_OPENAI_MODEL || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL)
+    ? (process.env.AI_PLAYER_TEST_OPENAI_MODEL || process.env.AI_PLAYER_OPENAI_MODEL || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL)
     : (process.env.AI_PLAYER_OPENAI_MODEL || process.env.AI_PLAYER_MODEL || process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL);
 }
 
@@ -102,8 +107,9 @@ export async function generateAiStoryDirection(input: GenerateAiStoryDirectionIn
     return generateWithDeepSeek(input);
   }
 
-  const apiKey = process.env.GAME_TEST_MODE === 'true'
-    ? (process.env.AI_PLAYER_TEST_API_KEY || process.env.AI_PLAYER_OPENAI_API_KEY || process.env.OPENAI_API_KEY)
+  const isTestMode = process.env.GAME_TEST_MODE === 'true';
+  const apiKey = isTestMode
+    ? (process.env.AI_PLAYER_TEST_OPENAI_API_KEY || process.env.AI_PLAYER_OPENAI_API_KEY || process.env.OPENAI_API_KEY)
     : (process.env.AI_PLAYER_OPENAI_API_KEY || process.env.OPENAI_API_KEY);
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY or AI_PLAYER_OPENAI_API_KEY is required for OpenAI AI players');
@@ -113,8 +119,8 @@ export async function generateAiStoryDirection(input: GenerateAiStoryDirectionIn
     provider: 'openai',
     apiKey,
     model: input.config.model || defaultModelForProvider('openai'),
-    baseUrl: process.env.GAME_TEST_MODE === 'true'
-      ? (process.env.AI_PLAYER_TEST_BASE_URL || process.env.AI_PLAYER_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com')
+    baseUrl: isTestMode
+      ? (process.env.AI_PLAYER_TEST_OPENAI_BASE_URL || process.env.AI_PLAYER_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com')
       : (process.env.AI_PLAYER_OPENAI_BASE_URL || process.env.OPENAI_BASE_URL || 'https://api.openai.com'),
   });
 
@@ -144,8 +150,9 @@ export async function generateAiStoryDirection(input: GenerateAiStoryDirectionIn
 }
 
 async function generateWithDeepSeek(input: GenerateAiStoryDirectionInput): Promise<AiPlayerOutput> {
-  const apiKey = process.env.GAME_TEST_MODE === 'true'
-    ? (process.env.AI_PLAYER_TEST_API_KEY || process.env.AI_PLAYER_DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)
+  const isTestMode = process.env.GAME_TEST_MODE === 'true';
+  const apiKey = isTestMode
+    ? (process.env.AI_PLAYER_TEST_DEEPSEEK_API_KEY || process.env.AI_PLAYER_TEST_API_KEY || process.env.AI_PLAYER_DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)
     : (process.env.AI_PLAYER_DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY);
   if (!apiKey) {
     throw new Error('DEEPSEEK_API_KEY or AI_PLAYER_DEEPSEEK_API_KEY is required for DeepSeek AI players');
@@ -167,8 +174,8 @@ async function generateWithDeepSeek(input: GenerateAiStoryDirectionInput): Promi
     provider: 'deepseek',
     apiKey,
     model: input.config.model || defaultModelForProvider('deepseek'),
-    baseUrl: process.env.GAME_TEST_MODE === 'true'
-      ? (process.env.AI_PLAYER_TEST_BASE_URL || process.env.AI_PLAYER_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com')
+    baseUrl: isTestMode
+      ? (process.env.AI_PLAYER_TEST_DEEPSEEK_BASE_URL || process.env.AI_PLAYER_TEST_BASE_URL || process.env.AI_PLAYER_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com')
       : (process.env.AI_PLAYER_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com'),
   });
 

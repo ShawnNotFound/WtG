@@ -1,33 +1,58 @@
 import { PoolClient } from 'pg';
 import pool from '../db/pool.js';
-import { createJsonModelClient, getJsonProviderConfig } from '../llm/jsonModelClient.js';
+import { createJsonModelClient, getJsonProviderConfig, JsonModelClient } from '../llm/jsonModelClient.js';
 import { getSessionLlmSelection } from '../llm/sessionLlmConfig.js';
 import { SEED_HEADLINES } from '../game/seedHeadlines.js';
 import {
-  buildHeadlineWorldStateUpdatePrompt,
+  buildEntityReactionPrompt,
+  buildHeadlineWorldStateIntakePrompt,
   buildInitialWorldStatePrompt,
   buildWorldStateInstructions,
-  headlineWorldStateUpdateJsonSchema,
-  HeadlineWorldStateUpdateOutput,
+  EntityReactionOutput,
+  entityReactionJsonSchema,
+  ExistingRelatedWorldNode,
+  headlineWorldStateIntakeJsonSchema,
+  HeadlineWorldStateIntakeOutput,
   InitialWorldStateOutput,
   initialWorldStateJsonSchema,
   WorldAttribute,
   WorldEdgeDraft,
   WorldNodeDraft,
-  WorldNodeUpdateDraft,
 } from './worldStatePrompt.js';
 
 type WorldStateJobKind = 'initial' | 'headline' | 'manual';
+type WorldStateJobStatus = 'queued' | 'running' | 'completed' | 'error';
+type ReactionStatus = 'affected' | 'unaffected' | 'skipped' | 'error';
 
 const INITIAL_GRAPH_WAIT_INTERVAL_MS = 1000;
 const INITIAL_GRAPH_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
+
+export interface WorldStatePropagationConfig {
+  enabled: boolean;
+  allowCycles: boolean;
+  maxPropagationDepth: number;
+  maxNodeReactions: number;
+  maxEventsPerNode: number;
+  nodeAgentConcurrency: number;
+  storeUnaffectedDecisions: boolean;
+}
+
+export const DEFAULT_WORLD_STATE_CONFIG: WorldStatePropagationConfig = {
+  enabled: true,
+  allowCycles: true,
+  maxPropagationDepth: 2,
+  maxNodeReactions: 20,
+  maxEventsPerNode: 2,
+  nodeAgentConcurrency: 4,
+  storeUnaffectedDecisions: true,
+};
 
 interface WorldStateJobRow {
   id: string;
   session_id: string;
   headline_id: string | null;
   kind: WorldStateJobKind;
-  status?: 'queued' | 'running' | 'completed' | 'error';
+  status?: WorldStateJobStatus;
   headline_text: string | null;
   input_snapshot: Record<string, unknown>;
 }
@@ -47,7 +72,8 @@ interface UpsertCounts {
   nodesUpdated: number;
   edgesCreated: number;
   edgesUpdated: number;
-  edgesSkippedForCycles: number;
+  selfEdgesSkipped: number;
+  edgesRejected: number;
 }
 
 interface AffectedWorldNode {
@@ -100,6 +126,49 @@ interface AdminGraphSnapshotEdge {
   updatedAt: string;
 }
 
+interface NodeRecord extends GraphSnapshotNode {
+  attributes?: Record<string, unknown>;
+}
+
+interface RelatedNodeRecord extends ExistingRelatedWorldNode {
+  id: string;
+}
+
+interface PropagationEvent {
+  id: string;
+  sourceEventId: string;
+  sourceNodeId: string | null;
+  sourceNodeName: string | null;
+  targetNodeId: string;
+  targetNodeName: string;
+  eventSummary: string;
+  evidence: string;
+  depth: number;
+}
+
+interface PropagationStats {
+  decisionsTotal: number;
+  affectedCount: number;
+  unaffectedCount: number;
+  skippedCount: number;
+  errorCount: number;
+  emittedEventCount: number;
+  depthReached: number;
+  cappedReason: string | null;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+  models: string[];
+}
+
+interface PropagationRunResult extends HeadlineUpsertResult {
+  propagationSummary: Omit<PropagationStats, 'usage' | 'models'> & {
+    usage: PropagationStats['usage'];
+    models: string[];
+  };
+}
+
 function clampNumber(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
@@ -127,6 +196,13 @@ function cleanRelationType(value: unknown): string {
   return cleaned || 'RELATED_TO';
 }
 
+function cleanEventId(value: unknown, fallback: string): string {
+  const cleaned = cleanText(value, fallback, 120)
+    .replace(/[^a-zA-Z0-9:_-]/g, '_')
+    .replace(/_+/g, '_');
+  return cleaned || fallback;
+}
+
 function attributesToRecord(attributes: WorldAttribute[] | undefined): Record<string, string> {
   const result: Record<string, string> = {};
   for (const attribute of attributes ?? []) {
@@ -147,30 +223,139 @@ function mergeAttributes(current: unknown, patch: Record<string, string>): Recor
   return { ...currentRecord, ...patch };
 }
 
+function parseNumberConfig(value: unknown, fallback: number, min: number, max: number): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.round(clampNumber(number, min, max));
+}
+
+export function normalizeWorldStateConfig(config: unknown): WorldStatePropagationConfig {
+  const source = config && typeof config === 'object'
+    ? (config as Partial<WorldStatePropagationConfig>)
+    : {};
+
+  return {
+    enabled: source.enabled !== false,
+    allowCycles: source.allowCycles !== false,
+    maxPropagationDepth: parseNumberConfig(
+      source.maxPropagationDepth,
+      DEFAULT_WORLD_STATE_CONFIG.maxPropagationDepth,
+      0,
+      8
+    ),
+    maxNodeReactions: parseNumberConfig(
+      source.maxNodeReactions,
+      DEFAULT_WORLD_STATE_CONFIG.maxNodeReactions,
+      1,
+      200
+    ),
+    maxEventsPerNode: parseNumberConfig(
+      source.maxEventsPerNode,
+      DEFAULT_WORLD_STATE_CONFIG.maxEventsPerNode,
+      1,
+      20
+    ),
+    nodeAgentConcurrency: parseNumberConfig(
+      source.nodeAgentConcurrency,
+      DEFAULT_WORLD_STATE_CONFIG.nodeAgentConcurrency,
+      1,
+      16
+    ),
+    storeUnaffectedDecisions: source.storeUnaffectedDecisions !== false,
+  };
+}
+
 function isWorldStateEnabled(config: unknown): boolean {
-  if (!config || typeof config !== 'object') return true;
-  return (config as { enabled?: unknown }).enabled !== false;
+  return normalizeWorldStateConfig(config).enabled;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getWorldClient(sessionId: string) {
+function emptyCounts(): UpsertCounts {
+  return {
+    nodesCreated: 0,
+    nodesUpdated: 0,
+    edgesCreated: 0,
+    edgesUpdated: 0,
+    selfEdgesSkipped: 0,
+    edgesRejected: 0,
+  };
+}
+
+function mergeCounts(target: UpsertCounts, patch: UpsertCounts): void {
+  target.nodesCreated += patch.nodesCreated;
+  target.nodesUpdated += patch.nodesUpdated;
+  target.edgesCreated += patch.edgesCreated;
+  target.edgesUpdated += patch.edgesUpdated;
+  target.selfEdgesSkipped += patch.selfEdgesSkipped;
+  target.edgesRejected += patch.edgesRejected;
+}
+
+function addAffectedNode(
+  affectedNodes: AffectedWorldNode[],
+  node: AffectedWorldNode
+): void {
+  const existing = affectedNodes.find((entry) => entry.id === node.id);
+  if (!existing) {
+    affectedNodes.push(node);
+    return;
+  }
+
+  if (node.depth < existing.depth) {
+    existing.depth = node.depth;
+    existing.role = node.role;
+  }
+}
+
+function highlightDepthForEventDepth(depth: number): 1 | 2 | 3 {
+  if (depth <= 0) return 1;
+  if (depth === 1) return 2;
+  return 3;
+}
+
+function affectedNamesFromIntake(output: HeadlineWorldStateIntakeOutput) {
+  return {
+    direct: [
+      ...output.newNodes.map((node) => cleanName(node.name)),
+      ...output.directEvents.map((event) => cleanName(event.targetNodeName)),
+    ],
+    cascade: [],
+    related: output.edges.flatMap((edge) => [cleanName(edge.source), cleanName(edge.target)]),
+  };
+}
+
+function addUsage(stats: PropagationStats, model: string, usage?: { inputTokens: number; outputTokens: number }): void {
+  if (!stats.models.includes(model)) {
+    stats.models.push(model);
+  }
+  if (usage) {
+    stats.usage.inputTokens += usage.inputTokens ?? 0;
+    stats.usage.outputTokens += usage.outputTokens ?? 0;
+  }
+}
+
+async function getWorldClient(sessionId: string): Promise<JsonModelClient> {
   const selection = await getSessionLlmSelection(sessionId);
   const config = getJsonProviderConfig('WORLD', selection);
   return createJsonModelClient(config);
 }
 
-async function isSessionWorldStateEnabled(sessionId: string): Promise<boolean> {
+async function getSessionWorldStateConfig(sessionId: string): Promise<WorldStatePropagationConfig | null> {
   const result = await pool.query(
     `SELECT world_state_config FROM game_sessions WHERE id = $1`,
     [sessionId]
   );
   if (!result?.rows?.length) {
-    return false;
+    return null;
   }
-  return isWorldStateEnabled(result.rows[0].world_state_config);
+  return normalizeWorldStateConfig(result.rows[0].world_state_config);
+}
+
+async function isSessionWorldStateEnabled(sessionId: string): Promise<boolean> {
+  const config = await getSessionWorldStateConfig(sessionId);
+  return config ? isWorldStateEnabled(config) : false;
 }
 
 async function loadGraphSnapshot(sessionId: string): Promise<{
@@ -278,11 +463,67 @@ async function loadAdminGraphSnapshot(sessionId: string): Promise<{
   };
 }
 
+async function loadNodeById(sessionId: string, nodeId: string): Promise<NodeRecord | null> {
+  const result = await pool.query(
+    `SELECT id, name, type, summary, attributes, times_updated
+     FROM world_state_nodes
+     WHERE session_id = $1 AND id = $2
+     LIMIT 1`,
+    [sessionId, nodeId]
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    summary: row.summary,
+    attributes: row.attributes ?? {},
+    timesUpdated: row.times_updated,
+  };
+}
+
+async function loadRelatedNodes(sessionId: string, nodeId: string): Promise<RelatedNodeRecord[]> {
+  const result = await pool.query(
+    `SELECT
+       neighbor.id,
+       neighbor.name,
+       neighbor.type,
+       neighbor.summary,
+       neighbor.times_updated,
+       CASE WHEN e.source_node_id = $2 THEN 'outgoing' ELSE 'incoming' END AS direction,
+       e.relation_type,
+       e.summary AS relation_summary
+     FROM world_state_edges e
+     JOIN world_state_nodes neighbor
+       ON neighbor.id = CASE
+         WHEN e.source_node_id = $2 THEN e.target_node_id
+         ELSE e.source_node_id
+       END
+     WHERE e.session_id = $1
+       AND (e.source_node_id = $2 OR e.target_node_id = $2)
+     ORDER BY e.times_updated DESC, neighbor.times_updated DESC, neighbor.name ASC
+     LIMIT 40`,
+    [sessionId, nodeId]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    summary: row.summary,
+    timesUpdated: row.times_updated,
+    direction: row.direction === 'incoming' ? 'incoming' : 'outgoing',
+    relationType: row.relation_type,
+    relationSummary: row.relation_summary,
+  }));
+}
+
 async function updateJob(
   jobId: string,
   stage: string,
   patch: {
-    status?: 'queued' | 'running' | 'completed' | 'error';
+    status?: WorldStateJobStatus;
     result?: Record<string, unknown>;
     error?: string | null;
     completed?: boolean;
@@ -307,7 +548,7 @@ async function updateJob(
   );
 }
 
-async function wouldCreateCycle(
+async function createsDirectedLoop(
   client: PoolClient,
   sessionId: string,
   sourceNodeId: string,
@@ -339,14 +580,14 @@ async function upsertNode(
   draft: Pick<WorldNodeDraft, 'name' | 'type' | 'summary' | 'attributes'>,
   headlineId: string | null,
   increment: number
-): Promise<{ id: string; created: boolean }> {
+): Promise<{ id: string; name: string; type: string; summary: string; created: boolean }> {
   const name = cleanName(draft.name);
   const type = cleanType(draft.type);
   const summary = cleanText(draft.summary, '', 1200);
   const attributes = attributesToRecord(draft.attributes);
 
   const existing = await client.query(
-    `SELECT id, attributes
+    `SELECT id, attributes, summary
      FROM world_state_nodes
      WHERE session_id = $1 AND lower(name) = lower($2)
      FOR UPDATE`,
@@ -375,7 +616,7 @@ async function upsertNode(
         row.id,
       ]
     );
-    return { id: row.id, created: false };
+    return { id: row.id, name, type, summary: summary || row.summary || '', created: false };
   }
 
   const inserted = await client.query(
@@ -394,31 +635,7 @@ async function upsertNode(
     ]
   );
 
-  return { id: inserted.rows[0].id, created: true };
-}
-
-async function upsertNodeUpdate(
-  client: PoolClient,
-  sessionId: string,
-  draft: WorldNodeUpdateDraft,
-  headlineId: string
-): Promise<{ id: string; created: boolean }> {
-  return upsertNode(
-    client,
-    sessionId,
-    {
-      name: draft.name,
-      type: draft.type,
-      summary: draft.updatedSummary || draft.summaryDelta,
-      attributes: [
-        ...draft.attributes,
-        { key: 'last_evidence', value: draft.evidence },
-        { key: 'last_delta', value: draft.summaryDelta },
-      ],
-    },
-    headlineId,
-    1
-  );
+  return { id: inserted.rows[0].id, name, type, summary, created: true };
 }
 
 async function upsertEdge(
@@ -426,8 +643,9 @@ async function upsertEdge(
   sessionId: string,
   draft: WorldEdgeDraft,
   headlineId: string | null,
-  increment: number
-): Promise<{ created: boolean; skippedForCycle: boolean }> {
+  increment: number,
+  allowCycles = true
+): Promise<{ created: boolean; selfEdgeSkipped: boolean; rejected: boolean }> {
   const source = await upsertNode(
     client,
     sessionId,
@@ -454,7 +672,7 @@ async function upsertEdge(
   );
 
   if (source.id === target.id) {
-    return { created: false, skippedForCycle: true };
+    return { created: false, selfEdgeSkipped: true, rejected: false };
   }
 
   const relationType = cleanRelationType(draft.relationType);
@@ -482,11 +700,11 @@ async function upsertEdge(
        WHERE id = $5`,
       [summary, weight, increment, headlineId, existing.rows[0].id]
     );
-    return { created: false, skippedForCycle: false };
+    return { created: false, selfEdgeSkipped: false, rejected: false };
   }
 
-  if (await wouldCreateCycle(client, sessionId, source.id, target.id)) {
-    return { created: false, skippedForCycle: true };
+  if (!allowCycles && await createsDirectedLoop(client, sessionId, source.id, target.id)) {
+    return { created: false, selfEdgeSkipped: false, rejected: true };
   }
 
   await client.query(
@@ -505,49 +723,13 @@ async function upsertEdge(
     ]
   );
 
-  return { created: true, skippedForCycle: false };
-}
-
-function emptyCounts(): UpsertCounts {
-  return {
-    nodesCreated: 0,
-    nodesUpdated: 0,
-    edgesCreated: 0,
-    edgesUpdated: 0,
-    edgesSkippedForCycles: 0,
-  };
-}
-
-function addAffectedNode(
-  affectedNodes: AffectedWorldNode[],
-  node: AffectedWorldNode
-): void {
-  const existing = affectedNodes.find((entry) => entry.id === node.id);
-  if (!existing) {
-    affectedNodes.push(node);
-    return;
-  }
-
-  if (node.depth < existing.depth) {
-    existing.depth = node.depth;
-    existing.role = node.role;
-  }
-}
-
-function affectedNodeNames(output: HeadlineWorldStateUpdateOutput) {
-  return {
-    direct: [
-      ...output.newNodes.map((node) => cleanName(node.name)),
-      ...output.directNodeUpdates.map((node) => cleanName(node.name)),
-    ],
-    cascade: output.cascadeNodeUpdates.map((node) => cleanName(node.name)),
-    related: output.edges.flatMap((edge) => [cleanName(edge.source), cleanName(edge.target)]),
-  };
+  return { created: true, selfEdgeSkipped: false, rejected: false };
 }
 
 async function applyInitialGraph(
   sessionId: string,
-  output: InitialWorldStateOutput
+  output: InitialWorldStateOutput,
+  config: WorldStatePropagationConfig
 ): Promise<UpsertCounts> {
   const client = await pool.connect();
   const counts = emptyCounts();
@@ -562,8 +744,9 @@ async function applyInitialGraph(
     }
 
     for (const edge of output.edges) {
-      const result = await upsertEdge(client, sessionId, edge, null, 0);
-      if (result.skippedForCycle) counts.edgesSkippedForCycles++;
+      const result = await upsertEdge(client, sessionId, edge, null, 0, config.allowCycles);
+      if (result.selfEdgeSkipped) counts.selfEdgesSkipped++;
+      else if (result.rejected) counts.edgesRejected++;
       else if (result.created) counts.edgesCreated++;
       else counts.edgesUpdated++;
     }
@@ -578,14 +761,92 @@ async function applyInitialGraph(
   }
 }
 
-async function applyHeadlineUpdate(
+async function applyHeadlineIntake(
   sessionId: string,
   headlineId: string,
-  output: HeadlineWorldStateUpdateOutput,
+  output: HeadlineWorldStateIntakeOutput,
+  config: WorldStatePropagationConfig,
   onStage?: (stage: string) => Promise<void>
+): Promise<HeadlineUpsertResult & { directEvents: PropagationEvent[] }> {
+  const client = await pool.connect();
+  const result: HeadlineUpsertResult & { directEvents: PropagationEvent[] } = {
+    ...emptyCounts(),
+    affectedNodes: [],
+    directEvents: [],
+  };
+
+  try {
+    await client.query('BEGIN');
+
+    await onStage?.('creating_new_actor_nodes');
+    for (const node of output.newNodes) {
+      const nodeResult = await upsertNode(client, sessionId, node, headlineId, 1);
+      if (nodeResult.created) result.nodesCreated++;
+      else result.nodesUpdated++;
+      addAffectedNode(result.affectedNodes, {
+        id: nodeResult.id,
+        name: nodeResult.name,
+        depth: 1,
+        role: 'new',
+      });
+    }
+
+    await onStage?.('updating_initial_relationships');
+    for (const edge of output.edges) {
+      const edgeResult = await upsertEdge(client, sessionId, edge, headlineId, 1, config.allowCycles);
+      if (edgeResult.selfEdgeSkipped) result.selfEdgesSkipped++;
+      else if (edgeResult.rejected) result.edgesRejected++;
+      else if (edgeResult.created) result.edgesCreated++;
+      else result.edgesUpdated++;
+    }
+
+    for (const [index, event] of output.directEvents.entries()) {
+      const eventId = cleanEventId(event.eventId, `direct_${index + 1}`);
+      const targetNode = await upsertNode(
+        client,
+        sessionId,
+        {
+          name: event.targetNodeName,
+          type: 'entity',
+          summary: '',
+          attributes: [],
+        },
+        headlineId,
+        0
+      );
+
+      result.directEvents.push({
+        id: eventId,
+        sourceEventId: eventId,
+        sourceNodeId: null,
+        sourceNodeName: null,
+        targetNodeId: targetNode.id,
+        targetNodeName: targetNode.name,
+        eventSummary: cleanText(event.eventSummary, '', 1200),
+        evidence: cleanText(event.evidence, '', 1200),
+        depth: 0,
+      });
+    }
+
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function applyAffectedReaction(
+  sessionId: string,
+  headlineId: string,
+  node: NodeRecord,
+  output: EntityReactionOutput,
+  config: WorldStatePropagationConfig
 ): Promise<HeadlineUpsertResult> {
   const client = await pool.connect();
-  const counts: HeadlineUpsertResult = {
+  const result: HeadlineUpsertResult = {
     ...emptyCounts(),
     affectedNodes: [],
   };
@@ -593,78 +854,152 @@ async function applyHeadlineUpdate(
   try {
     await client.query('BEGIN');
 
-    await onStage?.('creating_new_entity_nodes');
-    for (const node of output.newNodes) {
-      const result = await upsertNode(client, sessionId, node, headlineId, 1);
-      if (result.created) counts.nodesCreated++;
-      else counts.nodesUpdated++;
-      addAffectedNode(counts.affectedNodes, {
-        id: result.id,
-        name: cleanName(node.name),
-        depth: 1,
-        role: 'new',
-      });
-    }
+    const nodeResult = await upsertNode(
+      client,
+      sessionId,
+      {
+        name: node.name,
+        type: node.type,
+        summary: output.updatedSummary || output.summaryDelta || node.summary,
+        attributes: [
+          ...output.attributes,
+          { key: 'last_delta', value: output.summaryDelta },
+          { key: 'last_rationale', value: output.rationale },
+        ],
+      },
+      headlineId,
+      1
+    );
+    if (nodeResult.created) result.nodesCreated++;
+    else result.nodesUpdated++;
 
-    await onStage?.('updating_direct_entity_nodes');
-    for (const node of output.directNodeUpdates) {
-      const result = await upsertNodeUpdate(client, sessionId, node, headlineId);
-      if (result.created) counts.nodesCreated++;
-      else counts.nodesUpdated++;
-      addAffectedNode(counts.affectedNodes, {
-        id: result.id,
-        name: cleanName(node.name),
-        depth: 1,
-        role: 'direct',
-      });
-    }
-
-    await onStage?.('updating_cascade_entity_nodes');
-    for (const node of output.cascadeNodeUpdates) {
-      const result = await upsertNodeUpdate(client, sessionId, node, headlineId);
-      if (result.created) counts.nodesCreated++;
-      else counts.nodesUpdated++;
-      addAffectedNode(counts.affectedNodes, {
-        id: result.id,
-        name: cleanName(node.name),
-        depth: 2,
-        role: 'cascade',
-      });
-    }
-
-    await onStage?.('updating_entity_relationships');
     for (const edge of output.edges) {
-      const result = await upsertEdge(client, sessionId, edge, headlineId, 1);
-      if (result.skippedForCycle) counts.edgesSkippedForCycles++;
-      else if (result.created) counts.edgesCreated++;
-      else counts.edgesUpdated++;
-
-      const sourceResult = await client.query(
-        `SELECT id, name FROM world_state_nodes WHERE session_id = $1 AND lower(name) = lower($2) LIMIT 1`,
-        [sessionId, cleanName(edge.source)]
-      );
-      const targetResult = await client.query(
-        `SELECT id, name FROM world_state_nodes WHERE session_id = $1 AND lower(name) = lower($2) LIMIT 1`,
-        [sessionId, cleanName(edge.target)]
-      );
-      for (const row of [...sourceResult.rows, ...targetResult.rows]) {
-        addAffectedNode(counts.affectedNodes, {
-          id: row.id,
-          name: row.name,
-          depth: 3,
-          role: 'related',
-        });
-      }
+      const edgeResult = await upsertEdge(client, sessionId, edge, headlineId, 1, config.allowCycles);
+      if (edgeResult.selfEdgeSkipped) result.selfEdgesSkipped++;
+      else if (edgeResult.rejected) result.edgesRejected++;
+      else if (edgeResult.created) result.edgesCreated++;
+      else result.edgesUpdated++;
     }
 
     await client.query('COMMIT');
-    return counts;
+    return result;
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
+}
+
+interface ReactionTraceInput {
+  jobId: string;
+  sessionId: string;
+  headlineId: string | null;
+  event: PropagationEvent;
+  status: ReactionStatus;
+  nodeName?: string;
+  confidence?: number | null;
+  rationale?: string | null;
+  stateDelta?: string | null;
+  updatedSummary?: string | null;
+  emittedEvents?: unknown[];
+  proposedEdges?: unknown[];
+  model?: string | null;
+  usage?: unknown;
+  error?: string | null;
+}
+
+async function insertReactionTrace(input: ReactionTraceInput): Promise<void> {
+  await pool.query(
+    `INSERT INTO world_state_reactions
+       (job_id, session_id, headline_id, node_id, node_name, source_node_id, source_node_name,
+        source_event_id, event_id, depth, status, confidence, rationale, state_delta,
+        updated_summary, emitted_events, proposed_edges, model, usage, error)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
+    [
+      input.jobId,
+      input.sessionId,
+      input.headlineId,
+      input.event.targetNodeId,
+      input.nodeName ?? input.event.targetNodeName,
+      input.event.sourceNodeId,
+      input.event.sourceNodeName,
+      input.event.sourceEventId,
+      input.event.id,
+      input.event.depth,
+      input.status,
+      input.confidence ?? null,
+      input.rationale ?? null,
+      input.stateDelta ?? null,
+      input.updatedSummary ?? null,
+      JSON.stringify(input.emittedEvents ?? []),
+      JSON.stringify(input.proposedEdges ?? []),
+      input.model ?? null,
+      JSON.stringify(input.usage ?? {}),
+      input.error ?? null,
+    ]
+  );
+}
+
+export interface PropagationGateResult {
+  allowed: boolean;
+  reason?: 'max_depth' | 'max_node_reactions' | 'max_events_per_node' | 'duplicate';
+}
+
+export class PropagationLimiter {
+  private visited = new Set<string>();
+  private eventCountsByNode = new Map<string, number>();
+  private startedReactions = 0;
+  cappedReason: string | null = null;
+
+  constructor(private readonly config: WorldStatePropagationConfig) {}
+
+  tryReserve(event: Pick<PropagationEvent, 'sourceEventId' | 'targetNodeId' | 'depth'>): PropagationGateResult {
+    if (event.depth > this.config.maxPropagationDepth) {
+      return { allowed: false, reason: 'max_depth' };
+    }
+
+    if (this.startedReactions >= this.config.maxNodeReactions) {
+      this.cappedReason = this.cappedReason ?? 'max_node_reactions';
+      return { allowed: false, reason: 'max_node_reactions' };
+    }
+
+    const nodeCount = this.eventCountsByNode.get(event.targetNodeId) ?? 0;
+    if (nodeCount >= this.config.maxEventsPerNode) {
+      return { allowed: false, reason: 'max_events_per_node' };
+    }
+
+    const key = `${event.sourceEventId}:${event.targetNodeId}:${event.depth}`;
+    if (this.visited.has(key)) {
+      return { allowed: false, reason: 'duplicate' };
+    }
+
+    this.visited.add(key);
+    this.eventCountsByNode.set(event.targetNodeId, nodeCount + 1);
+    this.startedReactions++;
+    return { allowed: true };
+  }
+}
+
+async function runLimited<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = [];
+  let nextIndex = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex++;
+        results[index] = await worker(items[index], index);
+      }
+    })
+  );
+
+  return results;
 }
 
 async function generateInitialGraph(sessionId: string) {
@@ -677,13 +1012,13 @@ async function generateInitialGraph(sessionId: string) {
   });
 }
 
-async function generateHeadlineUpdate(job: WorldStateJobRow) {
+async function generateHeadlineIntake(job: WorldStateJobRow) {
   const input = job.input_snapshot as unknown as HeadlineUpdateJobInput;
   const snapshot = await loadGraphSnapshot(job.session_id);
   const client = await getWorldClient(job.session_id);
 
-  return client.callResponsesApi<HeadlineWorldStateUpdateOutput>({
-    input: buildHeadlineWorldStateUpdatePrompt({
+  return client.callResponsesApi<HeadlineWorldStateIntakeOutput>({
+    input: buildHeadlineWorldStateIntakePrompt({
       headline: input.headlineText,
       storyDirection: input.storyDirection,
       playerNickname: input.playerNickname,
@@ -693,9 +1028,270 @@ async function generateHeadlineUpdate(job: WorldStateJobRow) {
       edges: snapshot.edges,
     }),
     instructions: buildWorldStateInstructions(),
-    jsonSchema: headlineWorldStateUpdateJsonSchema,
+    jsonSchema: headlineWorldStateIntakeJsonSchema,
     temperature: 0.15,
   });
+}
+
+async function generateEntityReaction(
+  client: JsonModelClient,
+  input: HeadlineUpdateJobInput,
+  node: NodeRecord,
+  event: PropagationEvent,
+  relatedNodes: RelatedNodeRecord[],
+  config: WorldStatePropagationConfig
+) {
+  return client.callResponsesApi<EntityReactionOutput>({
+    input: buildEntityReactionPrompt({
+      headline: input.headlineText,
+      storyDirection: input.storyDirection,
+      playerNickname: input.playerNickname,
+      roundNo: input.roundNo,
+      inGameSubmittedAt: input.inGameSubmittedAt,
+      node,
+      incomingEvent: {
+        sourceNodeName: event.sourceNodeName,
+        sourceEventId: event.sourceEventId,
+        eventSummary: event.eventSummary,
+        evidence: event.evidence,
+        depth: event.depth,
+      },
+      relatedNodes,
+      maxPropagationDepth: config.maxPropagationDepth,
+    }),
+    instructions: buildWorldStateInstructions(),
+    jsonSchema: entityReactionJsonSchema,
+    temperature: 0.1,
+  });
+}
+
+async function processPropagationEvent(
+  job: WorldStateJobRow,
+  input: HeadlineUpdateJobInput,
+  event: PropagationEvent,
+  config: WorldStatePropagationConfig,
+  stats: PropagationStats,
+  aggregate: HeadlineUpsertResult,
+  client: JsonModelClient
+): Promise<PropagationEvent[]> {
+  const node = await loadNodeById(job.session_id, event.targetNodeId);
+  if (!node) {
+    stats.errorCount++;
+    await insertReactionTrace({
+      jobId: job.id,
+      sessionId: job.session_id,
+      headlineId: job.headline_id,
+      event,
+      status: 'error',
+      error: 'Target node no longer exists',
+    });
+    return [];
+  }
+
+  const relatedNodes = await loadRelatedNodes(job.session_id, node.id);
+
+  try {
+    const aiResult = await generateEntityReaction(client, input, node, event, relatedNodes, config);
+    addUsage(stats, aiResult.model, aiResult.usage);
+
+    const confidence = clampNumber(Number(aiResult.output.confidence ?? 0), 0, 1);
+    const affected = aiResult.output.affected === true;
+    stats.decisionsTotal++;
+    stats.depthReached = Math.max(stats.depthReached, event.depth);
+
+    if (!affected) {
+      stats.unaffectedCount++;
+      if (config.storeUnaffectedDecisions) {
+        await insertReactionTrace({
+          jobId: job.id,
+          sessionId: job.session_id,
+          headlineId: job.headline_id,
+          event,
+          status: 'unaffected',
+          nodeName: node.name,
+          confidence,
+          rationale: aiResult.output.rationale,
+          stateDelta: aiResult.output.summaryDelta,
+          updatedSummary: aiResult.output.updatedSummary || node.summary,
+          emittedEvents: aiResult.output.emittedEvents,
+          proposedEdges: aiResult.output.edges,
+          model: aiResult.model,
+          usage: aiResult.usage,
+        });
+      }
+      return [];
+    }
+
+    stats.affectedCount++;
+    const updateCounts = await applyAffectedReaction(job.session_id, job.headline_id!, node, aiResult.output, config);
+    mergeCounts(aggregate, updateCounts);
+    addAffectedNode(aggregate.affectedNodes, {
+      id: node.id,
+      name: node.name,
+      depth: highlightDepthForEventDepth(event.depth),
+      role: event.depth === 0 ? 'direct' : 'cascade',
+    });
+
+    await insertReactionTrace({
+      jobId: job.id,
+      sessionId: job.session_id,
+      headlineId: job.headline_id,
+      event,
+      status: 'affected',
+      nodeName: node.name,
+      confidence,
+      rationale: aiResult.output.rationale,
+      stateDelta: aiResult.output.summaryDelta,
+      updatedSummary: aiResult.output.updatedSummary,
+      emittedEvents: aiResult.output.emittedEvents,
+      proposedEdges: aiResult.output.edges,
+      model: aiResult.model,
+      usage: aiResult.usage,
+    });
+
+    const relatedByName = new Map(
+      relatedNodes.map((related) => [related.name.toLowerCase(), related])
+    );
+    const nextDepth = event.depth + 1;
+
+    if (nextDepth > config.maxPropagationDepth) {
+      return [];
+    }
+
+    const emitted: PropagationEvent[] = [];
+    for (const [index, emittedEvent] of aiResult.output.emittedEvents.entries()) {
+      const targetName = cleanName(emittedEvent.targetNodeName);
+      const target = relatedByName.get(targetName.toLowerCase());
+      if (!target || target.id === node.id) {
+        continue;
+      }
+
+      stats.emittedEventCount++;
+      emitted.push({
+        id: cleanEventId(
+          `${event.sourceEventId}:${node.id.slice(0, 8)}:${target.id.slice(0, 8)}:${nextDepth}:${index + 1}`,
+          `prop_${nextDepth}_${index + 1}`
+        ),
+        sourceEventId: event.sourceEventId,
+        sourceNodeId: node.id,
+        sourceNodeName: node.name,
+        targetNodeId: target.id,
+        targetNodeName: target.name,
+        eventSummary: cleanText(emittedEvent.eventSummary, '', 1200),
+        evidence: cleanText(emittedEvent.relationshipRationale || aiResult.output.rationale, '', 1200),
+        depth: nextDepth,
+      });
+    }
+
+    return emitted;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    stats.errorCount++;
+    await insertReactionTrace({
+      jobId: job.id,
+      sessionId: job.session_id,
+      headlineId: job.headline_id,
+      event,
+      status: 'error',
+      nodeName: node.name,
+      error: message,
+    });
+    return [];
+  }
+}
+
+async function applyPropagation(
+  job: WorldStateJobRow,
+  directEvents: PropagationEvent[],
+  config: WorldStatePropagationConfig,
+  intakeCounts: HeadlineUpsertResult,
+  onStage?: (stage: string) => Promise<void>
+): Promise<PropagationRunResult> {
+  const input = job.input_snapshot as unknown as HeadlineUpdateJobInput;
+  const aggregate: HeadlineUpsertResult = {
+    ...emptyCounts(),
+    affectedNodes: [...intakeCounts.affectedNodes],
+  };
+  mergeCounts(aggregate, intakeCounts);
+
+  const stats: PropagationStats = {
+    decisionsTotal: 0,
+    affectedCount: 0,
+    unaffectedCount: 0,
+    skippedCount: 0,
+    errorCount: 0,
+    emittedEventCount: 0,
+    depthReached: 0,
+    cappedReason: null,
+    usage: { inputTokens: 0, outputTokens: 0 },
+    models: [],
+  };
+
+  const limiter = new PropagationLimiter(config);
+  const client = await getWorldClient(job.session_id);
+  let frontier = directEvents;
+
+  while (frontier.length > 0) {
+    const depth = Math.min(...frontier.map((event) => event.depth));
+    await onStage?.(depth === 0 ? 'entity_agent_direct_wave' : `entity_agent_propagation_wave_${depth}`);
+
+    const runnable: PropagationEvent[] = [];
+    for (const event of frontier) {
+      const gate = limiter.tryReserve(event);
+      if (gate.allowed) {
+        runnable.push(event);
+        continue;
+      }
+
+      stats.skippedCount++;
+      if (gate.reason === 'max_node_reactions') {
+        stats.cappedReason = stats.cappedReason ?? 'max_node_reactions';
+      }
+      if (config.storeUnaffectedDecisions) {
+        await insertReactionTrace({
+          jobId: job.id,
+          sessionId: job.session_id,
+          headlineId: job.headline_id,
+          event,
+          status: 'skipped',
+          rationale: gate.reason ?? 'skipped',
+        });
+      }
+    }
+
+    if (runnable.length === 0) {
+      break;
+    }
+
+    const emittedGroups = await runLimited(
+      runnable,
+      config.nodeAgentConcurrency,
+      async (event) => processPropagationEvent(job, input, event, config, stats, aggregate, client)
+    );
+
+    frontier = emittedGroups.flat();
+    if (limiter.cappedReason) {
+      stats.cappedReason = stats.cappedReason ?? limiter.cappedReason;
+      await onStage?.('propagation_capped');
+      break;
+    }
+  }
+
+  return {
+    ...aggregate,
+    propagationSummary: {
+      decisionsTotal: stats.decisionsTotal,
+      affectedCount: stats.affectedCount,
+      unaffectedCount: stats.unaffectedCount,
+      skippedCount: stats.skippedCount,
+      errorCount: stats.errorCount,
+      emittedEventCount: stats.emittedEventCount,
+      depthReached: stats.depthReached,
+      cappedReason: stats.cappedReason,
+      usage: stats.usage,
+      models: stats.models,
+    },
+  };
 }
 
 export async function getWorldStateForJoinCode(joinCode: string) {
@@ -792,6 +1388,66 @@ export async function getWorldStateForJoinCode(joinCode: string) {
     ),
   ]);
 
+  const jobIds = jobsResult.rows.map((row) => row.id);
+  const reactionsByJob = new Map<string, unknown[]>();
+  if (jobIds.length > 0) {
+    const reactionsResult = await pool.query(
+      `SELECT
+         id,
+         job_id,
+         headline_id,
+         node_id,
+         node_name,
+         source_node_id,
+         source_node_name,
+         source_event_id,
+         event_id,
+         depth,
+         status,
+         confidence,
+         rationale,
+         state_delta,
+         updated_summary,
+         emitted_events,
+         proposed_edges,
+         model,
+         usage,
+         error,
+         created_at
+       FROM world_state_reactions
+       WHERE job_id = ANY($1::uuid[])
+       ORDER BY depth ASC, created_at ASC`,
+      [jobIds]
+    );
+
+    for (const row of reactionsResult.rows) {
+      const current = reactionsByJob.get(row.job_id) ?? [];
+      current.push({
+        id: row.id,
+        headlineId: row.headline_id,
+        nodeId: row.node_id,
+        nodeName: row.node_name,
+        sourceNodeId: row.source_node_id,
+        sourceNodeName: row.source_node_name,
+        sourceEventId: row.source_event_id,
+        eventId: row.event_id,
+        depth: row.depth,
+        status: row.status,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        stateDelta: row.state_delta,
+        updatedSummary: row.updated_summary,
+        emittedEvents: row.emitted_events,
+        proposedEdges: row.proposed_edges,
+        model: row.model,
+        usage: row.usage,
+        error: row.error,
+        createdAt: row.created_at,
+      });
+      reactionsByJob.set(row.job_id, current);
+    }
+  }
+
   return {
     session: {
       id: session.id,
@@ -806,7 +1462,7 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       pauseRemainingMs: session.pause_remaining_ms,
       timelineSpeedRatio: session.timeline_speed_ratio,
       llmConfig: session.llm_config,
-      worldStateConfig: session.world_state_config,
+      worldStateConfig: normalizeWorldStateConfig(session.world_state_config),
       players: session.players ?? [],
     },
     stats: {
@@ -847,6 +1503,7 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       headlineText: row.headline_text,
       result: row.result,
       error: row.error,
+      reactions: reactionsByJob.get(row.id) ?? [],
       createdAt: row.created_at,
       startedAt: row.started_at,
       completedAt: row.completed_at,
@@ -862,7 +1519,7 @@ export class WorldStateProcessor {
        SET status = 'running',
            stage = CASE
              WHEN kind = 'initial' THEN 'building_initial_actor_graph'
-             ELSE 'checking_new_entity_nodes'
+             ELSE 'headline_intake_agent'
            END,
            started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
        WHERE status = 'queued'
@@ -967,7 +1624,7 @@ export class WorldStateProcessor {
         await pool.query(
           `UPDATE world_state_jobs
            SET status = 'running',
-               stage = 'checking_new_entity_nodes',
+               stage = 'headline_intake_agent',
                started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
            WHERE id = $1`,
           [existingJob.id]
@@ -980,7 +1637,7 @@ export class WorldStateProcessor {
     const result = await pool.query(
       `INSERT INTO world_state_jobs
          (session_id, headline_id, kind, status, stage, agent, headline_text, input_snapshot, started_at)
-       VALUES ($1, $2, 'headline', 'running', 'checking_new_entity_nodes', 'world-state-updater', $3, $4, CURRENT_TIMESTAMP)
+       VALUES ($1, $2, 'headline', 'running', 'headline_intake_agent', 'world-state-propagator', $3, $4, CURRENT_TIMESTAMP)
        RETURNING id, session_id, headline_id, kind, headline_text, input_snapshot`,
       [
         input.sessionId,
@@ -1094,7 +1751,8 @@ export class WorldStateProcessor {
         rationale: aiResult.output.rationale,
       },
     });
-    const counts = await applyInitialGraph(job.session_id, aiResult.output);
+    const config = await getSessionWorldStateConfig(job.session_id) ?? DEFAULT_WORLD_STATE_CONFIG;
+    const counts = await applyInitialGraph(job.session_id, aiResult.output, config);
     const graphSnapshot = await loadAdminGraphSnapshot(job.session_id);
 
     await updateJob(job.id, 'completed', {
@@ -1113,42 +1771,63 @@ export class WorldStateProcessor {
       throw new Error('Headline world-state job is missing headline_id');
     }
 
+    const config = await getSessionWorldStateConfig(job.session_id);
+    if (!config?.enabled) {
+      return;
+    }
+
     const initialGraphReady = await this.ensureInitialGraphReady(job);
     if (!initialGraphReady) {
       return;
     }
 
-    await updateJob(job.id, 'checking_new_entity_nodes');
-    const aiResult = await generateHeadlineUpdate(job);
+    await updateJob(job.id, 'headline_intake_agent');
+    const aiResult = await generateHeadlineIntake(job);
     if (!(await this.isJobStillRunning(job.id))) {
       return;
     }
 
-    await updateJob(job.id, 'updating_direct_and_cascade_nodes', {
+    await updateJob(job.id, 'persisting_intake_plan', {
       result: {
         model: aiResult.model,
         usage: aiResult.usage ?? null,
         needsNewNodes: aiResult.output.needsNewNodes,
         impactSummary: aiResult.output.impactSummary,
-        affectedNodeNames: affectedNodeNames(aiResult.output),
+        affectedNodeNames: affectedNamesFromIntake(aiResult.output),
       },
     });
-    const counts = await applyHeadlineUpdate(
+
+    const intakeCounts = await applyHeadlineIntake(
       job.session_id,
       job.headline_id,
       aiResult.output,
+      config,
       async (stage) => updateJob(job.id, stage)
     );
+
     if (!(await this.isJobStillRunning(job.id))) {
       return;
     }
+
+    const propagationResult = await applyPropagation(
+      job,
+      intakeCounts.directEvents,
+      config,
+      intakeCounts,
+      async (stage) => updateJob(job.id, stage)
+    );
+
+    if (!(await this.isJobStillRunning(job.id))) {
+      return;
+    }
+
     const graphSnapshot = await loadAdminGraphSnapshot(job.session_id);
 
     await updateJob(job.id, 'completed', {
       status: 'completed',
       completed: true,
       result: {
-        ...counts,
+        ...propagationResult,
         graphSnapshot,
         graphSnapshotAt: new Date().toISOString(),
       },
