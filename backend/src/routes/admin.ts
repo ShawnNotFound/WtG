@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from 'express';
 import { z, ZodError } from 'zod';
 import pool from '../db/pool.js';
 import { normalizeAiPlayerConfig } from '../ai/aiPlayerService.js';
+import { aiPlayerManager } from '../ai/aiPlayerManager.js';
 import { gameLoopManager } from '../game/gameLoop.js';
 import { getPlayerScoreBreakdowns } from '../game/scoringService.js';
 import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
@@ -12,6 +13,7 @@ import {
   llmConfigSchema,
   moduleLlmConfigSchema,
   nicknameSchema,
+  sessionTitleSchema,
   summaryConfigSchema,
   worldStateConfigSchema,
 } from '../utils/validation.js';
@@ -23,6 +25,7 @@ const router = Router();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'password';
 
 const adminConfigSchema = z.object({
+  title: sessionTitleSchema.optional(),
   playMinutes: z.number().min(0.1).max(120).optional(),
   breakMinutes: z.number().min(0).max(60).optional(),
   maxRounds: z.number().int().min(1).max(20).optional(),
@@ -77,32 +80,41 @@ function validationError(res: Response, error: unknown): boolean {
 router.use(requireAdmin);
 router.use('/evaluations', evaluationsRouter);
 
-router.get('/sessions', async (_req: Request, res: Response): Promise<void> => {
+router.get('/sessions', async (req: Request, res: Response): Promise<void> => {
   try {
+    const includeArchived = req.query.includeArchived === 'true';
     const result = await pool.query(
       `SELECT
          s.id,
+         s.title,
          s.join_code,
          s.phase,
          s.is_paused,
          s.current_round,
+         s.archived_at,
          s.created_at,
          COUNT(p.id)::int AS player_count
        FROM game_sessions s
        LEFT JOIN session_players p ON p.session_id = s.id AND p.is_system = FALSE
+       WHERE ($1::boolean OR s.archived_at IS NULL)
        GROUP BY s.id
-       ORDER BY s.created_at DESC
-       LIMIT 50`
+       ORDER BY
+         CASE WHEN s.archived_at IS NULL THEN 0 ELSE 1 END,
+         s.created_at DESC
+       LIMIT 80`,
+      [includeArchived]
     );
 
     res.json({
       sessions: result.rows.map((row) => ({
         id: row.id,
+        title: row.title,
         joinCode: row.join_code,
         phase: row.phase,
         isPaused: row.is_paused === true,
         currentRound: row.current_round,
         playerCount: row.player_count,
+        archivedAt: row.archived_at,
         createdAt: row.created_at,
       })),
     });
@@ -114,13 +126,88 @@ router.get('/sessions', async (_req: Request, res: Response): Promise<void> => {
 
 async function getSessionForAdminAction(joinCode: string) {
   const result = await pool.query(
-    `SELECT id, join_code, phase
+    `SELECT id, title, join_code, phase, archived_at
      FROM game_sessions
      WHERE join_code = $1`,
     [joinCode]
   );
   return result.rows[0] ?? null;
 }
+
+router.post('/sessions/:joinCode/archive', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const joinCode = joinCodeSchema.parse(req.params.joinCode.toUpperCase());
+    const session = await getSessionForAdminAction(joinCode);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    gameLoopManager.stopLoop(session.id);
+    aiPlayerManager.stopSession(session.id);
+    await pool.query(
+      `UPDATE game_sessions
+       SET archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [session.id]
+    );
+
+    const state = await getWorldStateForJoinCode(joinCode);
+    res.json(state);
+  } catch (error) {
+    if (validationError(res, error)) return;
+    console.error('Admin archive failed:', error);
+    res.status(500).json({ error: 'Failed to archive session' });
+  }
+});
+
+router.post('/sessions/:joinCode/unarchive', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const joinCode = joinCodeSchema.parse(req.params.joinCode.toUpperCase());
+    const session = await getSessionForAdminAction(joinCode);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    await pool.query(
+      `UPDATE game_sessions
+       SET archived_at = NULL,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [session.id]
+    );
+
+    const state = await getWorldStateForJoinCode(joinCode);
+    res.json(state);
+  } catch (error) {
+    if (validationError(res, error)) return;
+    console.error('Admin unarchive failed:', error);
+    res.status(500).json({ error: 'Failed to unarchive session' });
+  }
+});
+
+router.delete('/sessions/:joinCode', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const joinCode = joinCodeSchema.parse(req.params.joinCode.toUpperCase());
+    const session = await getSessionForAdminAction(joinCode);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    gameLoopManager.stopLoop(session.id);
+    aiPlayerManager.stopSession(session.id);
+    await pool.query(`UPDATE game_sessions SET host_player_id = NULL WHERE id = $1`, [session.id]);
+    await pool.query(`DELETE FROM game_sessions WHERE id = $1`, [session.id]);
+    res.json({ success: true, deletedJoinCode: joinCode });
+  } catch (error) {
+    if (validationError(res, error)) return;
+    console.error('Admin delete failed:', error);
+    res.status(500).json({ error: 'Failed to delete session' });
+  }
+});
 
 router.post('/sessions/:joinCode/pause', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -206,7 +293,7 @@ router.get('/sessions/:joinCode/summary', async (req: Request, res: Response): P
   try {
     const joinCode = joinCodeSchema.parse(req.params.joinCode.toUpperCase());
     const sessionResult = await pool.query(
-      `SELECT id, join_code, phase, current_round, max_rounds, play_minutes, created_at
+      `SELECT id, title, join_code, phase, current_round, max_rounds, play_minutes, created_at
        FROM game_sessions
        WHERE join_code = $1`,
       [joinCode]
@@ -276,6 +363,7 @@ router.get('/sessions/:joinCode/summary', async (req: Request, res: Response): P
     res.json({
       session: {
         id: session.id,
+        title: session.title,
         joinCode: session.join_code,
         phase: session.phase,
         currentRound: session.current_round,
@@ -389,6 +477,7 @@ router.patch('/sessions/:joinCode/config', async (req: Request, res: Response): 
       updates.push(`${sql} = $${values.length}`);
     };
 
+    if (parsed.title !== undefined) addUpdate('title', parsed.title);
     if (parsed.playMinutes !== undefined) addUpdate('play_minutes', parsed.playMinutes);
     if (parsed.breakMinutes !== undefined) addUpdate('break_minutes', parsed.breakMinutes);
     if (parsed.maxRounds !== undefined) addUpdate('max_rounds', parsed.maxRounds);

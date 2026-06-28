@@ -48,11 +48,13 @@ const PROVIDER_OPTIONS = [
 
 interface AdminSessionSummary {
   id: string;
+  title: string;
   joinCode: string;
   phase: string;
   isPaused?: boolean;
   currentRound: number;
   playerCount: number;
+  archivedAt?: string | null;
   createdAt: string;
 }
 
@@ -151,8 +153,10 @@ interface AffectedNodeNamesResult {
 interface WorldStateResponse {
   session: {
     id: string;
+    title: string;
     joinCode: string;
     phase: string;
+    archivedAt?: string | null;
     isPaused?: boolean;
     currentRound: number;
     playMinutes: number;
@@ -227,6 +231,7 @@ interface LlmDraft {
 }
 
 interface ConfigDraft {
+  title: string;
   playMinutes: string;
   breakMinutes: string;
   maxRounds: string;
@@ -288,6 +293,7 @@ function draftFromState(state: WorldStateResponse): ConfigDraft {
   }
 
   return {
+    title: state.session.title ?? 'Future Headlines',
     playMinutes: String(state.session.playMinutes),
     breakMinutes: String(state.session.breakMinutes),
     maxRounds: String(state.session.maxRounds),
@@ -1255,6 +1261,7 @@ export function AdminPage() {
   const [password, setPassword] = useState(() => localStorage.getItem('futureHeadlines_adminPassword') ?? '');
   const [sessions, setSessions] = useState<AdminSessionSummary[]>([]);
   const [selectedJoinCode, setSelectedJoinCode] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
   const [worldState, setWorldState] = useState<WorldStateResponse | null>(null);
   const [helperMessages, setHelperMessages] = useState<WorldHelperMessage[]>([]);
   const [configDraft, setConfigDraft] = useState<ConfigDraft | null>(null);
@@ -1278,12 +1285,20 @@ export function AdminPage() {
 
   const loadSessions = useCallback(async () => {
     if (!password) return;
-    const data = await adminFetch('/api/admin/sessions');
+    const query = showArchived ? '?includeArchived=true' : '';
+    const data = await adminFetch(`/api/admin/sessions${query}`);
     setSessions(data.sessions ?? []);
-    if (!selectedJoinCode && data.sessions?.[0]?.joinCode) {
+    const selectedStillVisible = data.sessions?.some((session: AdminSessionSummary) => session.joinCode === selectedJoinCode);
+    if (selectedJoinCode && !selectedStillVisible) {
+      setSelectedJoinCode(data.sessions?.[0]?.joinCode ?? '');
+      setWorldState(null);
+      setHelperMessages([]);
+      setConfigDraft(null);
+      setDraftDirty(false);
+    } else if (!selectedJoinCode && data.sessions?.[0]?.joinCode) {
       setSelectedJoinCode(data.sessions[0].joinCode);
     }
-  }, [adminFetch, password, selectedJoinCode]);
+  }, [adminFetch, password, selectedJoinCode, showArchived]);
 
   const loadWorldState = useCallback(async () => {
     if (!password || !selectedJoinCode) return;
@@ -1384,6 +1399,7 @@ export function AdminPage() {
       const data = await adminFetch(`/api/admin/sessions/${selectedJoinCode}/config`, {
         method: 'PATCH',
         body: JSON.stringify({
+          title: configDraft.title.trim() || 'Future Headlines',
           playMinutes: Number(configDraft.playMinutes),
           breakMinutes: Number(configDraft.breakMinutes),
           maxRounds: Number(configDraft.maxRounds),
@@ -1460,6 +1476,57 @@ export function AdminPage() {
       await loadSessions();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update pause state');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleArchive = async () => {
+    if (!selectedJoinCode || !worldState) return;
+    const isArchived = Boolean(worldState.session.archivedAt);
+    const action = isArchived ? 'unarchive' : 'archive';
+    const title = worldState.session.title || selectedJoinCode;
+    const confirmed = window.confirm(
+      isArchived
+        ? `Unarchive "${title}"?`
+        : `Archive "${title}"? Active timers and AI players for this session will stop.`
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    setError('');
+    try {
+      const data = await adminFetch(`/api/admin/sessions/${selectedJoinCode}/${action}`, { method: 'POST' });
+      setWorldState(data);
+      setConfigDraft(draftFromState(data));
+      setDraftDirty(false);
+      await loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action} session`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteSession = async () => {
+    if (!selectedJoinCode || !worldState) return;
+    const title = worldState.session.title || selectedJoinCode;
+    const confirmed = window.confirm(
+      `Delete "${title}" permanently? This removes players, headlines, summaries, world graph data, and helper history.`
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    setError('');
+    try {
+      await adminFetch(`/api/admin/sessions/${selectedJoinCode}`, { method: 'DELETE' });
+      setWorldState(null);
+      setHelperMessages([]);
+      setConfigDraft(null);
+      setDraftDirty(false);
+      await loadSessions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete session');
     } finally {
       setBusy(false);
     }
@@ -1559,6 +1626,25 @@ export function AdminPage() {
                 {worldState.session.isPaused ? 'Resume Game' : 'Pause Game'}
               </Button>
             )}
+            {worldState && (
+              <Button
+                variant="ghost"
+                onClick={toggleArchive}
+                disabled={!selectedJoinCode || busy}
+              >
+                {worldState.session.archivedAt ? 'Unarchive Session' : 'Archive Session'}
+              </Button>
+            )}
+            {worldState && (
+              <Button
+                variant="ghost"
+                onClick={deleteSession}
+                disabled={!selectedJoinCode || busy}
+                className="text-red-600 hover:bg-red-50 hover:text-red-700"
+              >
+                Delete Session
+              </Button>
+            )}
             <Button variant="secondary" onClick={() => loadWorldState()} disabled={!selectedJoinCode || busy}>
               Refresh
             </Button>
@@ -1584,6 +1670,15 @@ export function AdminPage() {
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Sessions</h2>
                 <Button variant="ghost" size="sm" onClick={() => loadSessions()}>Reload</Button>
               </div>
+              <label className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                Show archived
+                <input
+                  type="checkbox"
+                  checked={showArchived}
+                  onChange={(event) => setShowArchived(event.target.checked)}
+                  className="h-4 w-4 accent-indigo-600"
+                />
+              </label>
               <div data-testid="admin-session-list" className="min-h-0 space-y-2 overflow-y-auto pr-1">
                 {sessions.map((session) => (
                   <button
@@ -1600,13 +1695,16 @@ export function AdminPage() {
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="font-mono text-sm font-semibold text-gray-900">{session.joinCode}</span>
+                      <span className="min-w-0 truncate text-sm font-semibold text-gray-900">
+                        {session.title || 'Future Headlines'}
+                      </span>
                       <Badge variant={session.isPaused ? 'yellow' : session.phase === 'PLAYING' ? 'green' : 'default'}>
-                        {session.isPaused ? 'PAUSED' : session.phase}
+                        {session.archivedAt ? 'ARCHIVED' : session.isPaused ? 'PAUSED' : session.phase}
                       </Badge>
                     </div>
-                    <div className="mt-1 text-xs text-gray-500">
-                      Round {session.currentRound} / {session.playerCount} players
+                    <div className="mt-1 flex items-center justify-between gap-2 text-xs text-gray-500">
+                      <span>Round {session.currentRound} / {session.playerCount} players</span>
+                      <span className="font-mono text-gray-400">{session.joinCode}</span>
                     </div>
                   </button>
                 ))}
@@ -1745,6 +1843,15 @@ export function AdminPage() {
                 {configDraft && (
                     <Card padding="md" className="max-h-[520px] min-w-0 space-y-3 overflow-y-auto" data-testid="admin-parameters-panel">
                       <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Game Parameters</h2>
+                      <label className="block text-xs text-gray-500">
+                        Session title
+                        <input
+                          value={configDraft.title}
+                          maxLength={80}
+                          onChange={(event) => patchDraft({ title: event.target.value })}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                        />
+                      </label>
                       <div className="grid grid-cols-2 gap-2">
                         <label className="text-xs text-gray-500">
                           Play minutes

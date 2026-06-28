@@ -17,6 +17,12 @@ export const joinCodeSchema = z
   .length(6, 'Join code must be exactly 6 characters')
   .regex(/^[A-Z0-9]+$/, 'Join code must contain only uppercase letters and numbers');
 
+export const sessionTitleSchema = z
+  .string()
+  .max(80, 'Game title must be at most 80 characters')
+  .transform((val) => val.trim())
+  .refine((val) => val.length > 0, 'Game title cannot be empty');
+
 export const aiPlayerConfigSchema = z.object({
   nickname: nicknameSchema.optional(),
   stylePrompt: z.string().max(500).optional(),
@@ -56,6 +62,7 @@ export const worldStateConfigSchema = z.object({
 
 // request body schemas
 export const createSessionSchema = z.object({
+  title: sessionTitleSchema.optional(),
   hostNickname: nicknameSchema,
   aiPlayers: z.array(aiPlayerConfigSchema).max(8).optional(),
   llmConfig: llmConfigSchema.optional(),

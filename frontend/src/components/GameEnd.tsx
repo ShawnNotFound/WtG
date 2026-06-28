@@ -5,6 +5,7 @@ import { ScoreBarChart } from './ScoreBarChart';
 import { HeadlineFeed } from './HeadlineFeed';
 
 interface GameEndProps {
+  title: string;
   joinCode: string;
   players: Player[];
   headlines: Headline[];
@@ -20,7 +21,7 @@ interface GameEndProps {
 }
 
 export function GameEnd({
-  joinCode,
+  title,
   players,
   headlines,
   currentPlayerId,
@@ -102,9 +103,9 @@ export function GameEnd({
       };
 
       // header
-      writeText('Future Headlines', 22, { bold: true, gapAfter: 1 });
+      writeText(title || 'Future Headlines', 22, { bold: true, gapAfter: 1 });
       writeText(
-        `Session ${joinCode} · ${maxRounds} rounds · 20 years of history`,
+        `${maxRounds} rounds - 20 years of history`,
         10,
         { color: [120, 120, 120], gapAfter: 6 }
       );
@@ -194,7 +195,12 @@ export function GameEnd({
       }
 
       const date = new Date().toISOString().slice(0, 10);
-      pdf.save(`future-headlines-${joinCode}-${date}.pdf`);
+      const titleSlug = (title || 'future-headlines')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'future-headlines';
+      pdf.save(`${titleSlug}-${date}.pdf`);
     } catch (err) {
       console.error('Failed to generate PDF:', err);
     } finally {
@@ -209,7 +215,7 @@ export function GameEnd({
           <div className="text-center">
             <h1 className="text-2xl font-bold text-gray-800">Game Complete</h1>
             <p className="text-sm text-gray-400 mt-1">
-              Session {joinCode} &middot; {maxRounds} rounds &middot; 20 years of history
+              {title || 'Future Headlines'} &middot; {maxRounds} rounds &middot; 20 years of history
             </p>
           </div>
 

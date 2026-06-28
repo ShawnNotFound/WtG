@@ -365,7 +365,7 @@ export async function getRoundSummary(
  */
 export async function getSessionIdFromJoinCode(joinCode: string): Promise<string | null> {
   const result = await pool.query(
-    `SELECT id FROM game_sessions WHERE join_code = $1`,
+    `SELECT id FROM game_sessions WHERE join_code = $1 AND archived_at IS NULL`,
     [joinCode]
   );
 

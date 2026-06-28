@@ -394,6 +394,7 @@ class GameLoopInstance {
     const result = await pool.query(
       `SELECT
         s.id,
+        s.title,
         s.join_code,
         s.status,
         s.host_player_id,
@@ -480,6 +481,7 @@ class GameLoopInstance {
 
     const gameState = {
       id: session.id,
+      title: session.title,
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,

@@ -28,6 +28,7 @@ const validationMessage = (data: any, fallback: string) => {
 };
 
 interface HostLobbyProps {
+  title: string;
   joinCode: string;
   players: any[];
   currentPlayerId: string;
@@ -73,6 +74,7 @@ const defaultAiDraft: AiDraft = {
 };
 
 export function HostLobby({
+  title,
   joinCode,
   players,
   currentPlayerId,
@@ -376,7 +378,7 @@ export function HostLobby({
   const lobbyContent = (
     <>
       <div className="text-center space-y-1">
-        <h1 className="text-3xl font-bold text-gray-900">Game Lobby</h1>
+        <h1 className="text-3xl font-bold text-gray-900">{title || 'Game Lobby'}</h1>
         <p className="text-sm text-gray-500">Share the invite link with players</p>
       </div>
 
@@ -411,6 +413,7 @@ export function HostLobby({
 
   return (
     <GameLayout
+      title={title}
       joinCode={joinCode}
       players={players}
       currentPlayerId={currentPlayerId}

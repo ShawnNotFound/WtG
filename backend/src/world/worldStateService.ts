@@ -1298,6 +1298,7 @@ export async function getWorldStateForJoinCode(joinCode: string) {
   const sessionResult = await pool.query(
     `SELECT
        s.id,
+       s.title,
        s.join_code,
        s.phase,
        s.current_round,
@@ -1312,6 +1313,7 @@ export async function getWorldStateForJoinCode(joinCode: string) {
        s.module_llm_config,
        s.world_state_config,
        s.summary_config,
+       s.archived_at,
        json_agg(
          json_build_object(
            'id', p.id,
@@ -1453,8 +1455,10 @@ export async function getWorldStateForJoinCode(joinCode: string) {
   return {
     session: {
       id: session.id,
+      title: session.title,
       joinCode: session.join_code,
       phase: session.phase,
+      archivedAt: session.archived_at,
       currentRound: session.current_round,
       playMinutes: session.play_minutes,
       breakMinutes: session.break_minutes,

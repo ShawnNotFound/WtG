@@ -92,6 +92,7 @@ interface JoinLobbyData {
 
 interface SessionState {
   id: string;
+  title: string;
   joinCode: string;
   status: string;
   hostPlayerId: string | null;
@@ -148,6 +149,7 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
     const result = await pool.query(
       `SELECT
         s.id,
+        s.title,
         s.join_code,
         s.status,
         s.host_player_id,
@@ -167,6 +169,7 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
         s.pause_remaining_ms,
         s.in_game_start_at,
         s.timeline_speed_ratio,
+        s.archived_at,
         s.planet_usage_global,
         CURRENT_TIMESTAMP as server_now,
         json_agg(
@@ -193,6 +196,10 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
     }
 
     const session = result.rows[0];
+    if (session.archived_at) {
+      return null;
+    }
+
     const serverNow = new Date(session.server_now);
 
     // compute in-game time
@@ -231,6 +238,7 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
 
     return {
       id: session.id,
+      title: session.title,
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,

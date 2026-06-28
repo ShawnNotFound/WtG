@@ -37,6 +37,7 @@ export interface Player {
 
 interface SessionState {
   id: string;
+  title: string;
   joinCode: string;
   status: string;
   hostPlayerId: string | null;

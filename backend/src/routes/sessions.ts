@@ -19,7 +19,7 @@ const router = Router();
 
 async function verifyHostWaitingSession(joinCode: string, hostPlayerId: string) {
   const result = await pool.query(
-    `SELECT id, host_player_id, status
+    `SELECT id, host_player_id, status, archived_at
      FROM game_sessions
      WHERE join_code = $1`,
     [joinCode]
@@ -30,6 +30,10 @@ async function verifyHostWaitingSession(joinCode: string, hostPlayerId: string) 
   }
 
   const session = result.rows[0];
+  if (session.archived_at) {
+    return { errorStatus: 404, error: 'Session not found' } as const;
+  }
+
   if (session.host_player_id !== hostPlayerId) {
     return { errorStatus: 403, error: 'Only the host can manage AI players' } as const;
   }
@@ -48,6 +52,7 @@ async function verifyHostWaitingSession(joinCode: string, hostPlayerId: string) 
 router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
   try {
     const {
+      title,
       hostNickname,
       aiPlayers = [],
       llmConfig,
@@ -76,6 +81,7 @@ router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
       // create session with game configuration
       const sessionResult = await client.query(
         `INSERT INTO game_sessions (
+          title,
           join_code,
           status,
           play_minutes,
@@ -87,9 +93,10 @@ router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
           world_state_config,
           summary_config
         )
-         VALUES ($1, 'WAITING', $2, $3, $4, $5, $6, $7, $8, $9)
-         RETURNING id, join_code, status, llm_config, module_llm_config, world_state_config, summary_config, created_at, updated_at`,
+         VALUES ($1, $2, 'WAITING', $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, title, join_code, status, llm_config, module_llm_config, world_state_config, summary_config, created_at, updated_at`,
         [
+          title ?? 'Future Headlines',
           joinCode,
           playMinutes ?? 8,
           breakMinutes ?? 3,
@@ -145,6 +152,7 @@ router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
       res.status(201).json({
         session: {
           id: session.id,
+          title: session.title,
           joinCode: session.join_code,
           status: session.status,
           llmConfig: session.llm_config,
@@ -199,11 +207,11 @@ router.post('/sessions/:joinCode/join', async (req: Request, res: Response): Pro
 
       // check if session exists
       const sessionResult = await client.query(
-        `SELECT id, join_code, status FROM game_sessions WHERE join_code = $1`,
+        `SELECT id, title, join_code, status, archived_at FROM game_sessions WHERE join_code = $1`,
         [joinCode]
       );
 
-      if (sessionResult.rows.length === 0) {
+      if (sessionResult.rows.length === 0 || sessionResult.rows[0].archived_at) {
         await client.query('ROLLBACK');
         res.status(404).json({ error: 'Session not found' });
         return;
@@ -250,6 +258,7 @@ router.post('/sessions/:joinCode/join', async (req: Request, res: Response): Pro
       res.status(201).json({
         session: {
           id: session.id,
+          title: session.title,
           joinCode: session.join_code,
           status: session.status,
         },
@@ -295,7 +304,9 @@ router.post('/sessions/:joinCode/rejoin', async (req: Request, res: Response): P
         `SELECT sp.id, sp.nickname, sp.is_host
          FROM session_players sp
          JOIN game_sessions gs ON gs.id = sp.session_id
-         WHERE gs.join_code = $1 AND LOWER(sp.nickname) = LOWER($2)`,
+         WHERE gs.join_code = $1
+           AND gs.archived_at IS NULL
+           AND LOWER(sp.nickname) = LOWER($2)`,
         [joinCode, nickname]
       );
 
@@ -515,6 +526,7 @@ router.get('/sessions/:joinCode', async (req: Request, res: Response): Promise<v
     const result = await pool.query(
       `SELECT 
         s.id,
+        s.title,
         s.join_code,
         s.status,
         s.host_player_id,
@@ -537,6 +549,7 @@ router.get('/sessions/:joinCode', async (req: Request, res: Response): Promise<v
       FROM game_sessions s
       LEFT JOIN session_players p ON s.id = p.session_id
       WHERE s.join_code = $1
+        AND s.archived_at IS NULL
       GROUP BY s.id`,
       [joinCode]
     );
@@ -550,6 +563,7 @@ router.get('/sessions/:joinCode', async (req: Request, res: Response): Promise<v
 
     res.json({
       id: session.id,
+      title: session.title,
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,

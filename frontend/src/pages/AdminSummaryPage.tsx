@@ -9,6 +9,7 @@ const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 interface AdminSummaryResponse {
   session: {
     id: string;
+    title: string;
     joinCode: string;
     phase: string;
     currentRound: number;
@@ -140,6 +141,7 @@ export function AdminSummaryPage() {
   return (
     <div className="flex h-[100dvh] flex-col overflow-hidden bg-gradient-to-b from-gray-50 to-gray-100/80">
       <GameEnd
+        title={data.session.title}
         joinCode={data.session.joinCode}
         players={data.players}
         headlines={data.headlines}

@@ -88,6 +88,7 @@ const createInitialAiPlayer = (index: number): InitialAiPlayer => ({
 
 function App() {
   const navigate = useNavigate();
+  const [gameTitle, setGameTitle] = useState('Future Headlines');
   const [nickname, setNickname] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -196,6 +197,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          title: gameTitle.trim() || 'Future Headlines',
           hostNickname: trimmedNickname,
           llmConfig: {
             ...llmConfig,
@@ -433,6 +435,7 @@ function App() {
   ) : sessionState ? (
     sessionData.isHost ? (
       <HostLobby
+        title={sessionState.title}
         joinCode={sessionState.joinCode}
         players={sessionState.players}
         currentPlayerId={sessionData.playerId}
@@ -460,6 +463,7 @@ function App() {
       />
     ) : (
       <JoinLobby
+        title={sessionState.title}
         joinCode={sessionState.joinCode}
         players={sessionState.players}
         currentPlayerId={sessionData.playerId}
@@ -509,6 +513,20 @@ function App() {
             </div>
 
             <Card padding="lg" className="space-y-5">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1.5">
+                  Game Title
+                </label>
+                <input
+                  type="text"
+                  value={gameTitle}
+                  onChange={(e) => setGameTitle(e.target.value)}
+                  placeholder="Future Headlines"
+                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent bg-gray-50"
+                  maxLength={80}
+                />
+              </div>
+
               <div>
                 <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1.5">
                   Nickname

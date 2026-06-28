@@ -4,6 +4,7 @@ import { Headline, RoundSummary as RoundSummaryType, FinalSummary, WorldHelperMe
 import { useGameTimeProgress } from '../hooks/useGameTimeProgress';
 
 interface JoinLobbyProps {
+  title: string;
   joinCode: string;
   players: any[];
   currentPlayerId: string;
@@ -30,6 +31,7 @@ interface JoinLobbyProps {
 }
 
 export function JoinLobby({
+  title,
   joinCode,
   players,
   currentPlayerId,
@@ -72,10 +74,8 @@ export function JoinLobby({
   const lobbyContent = (
     <>
       <div className="text-center space-y-1">
-        <h1 className="text-3xl font-bold text-gray-900">Waiting for Game</h1>
-        <p className="text-sm text-gray-500">
-          Session <span className="font-mono font-semibold">{joinCode}</span>
-        </p>
+        <h1 className="text-3xl font-bold text-gray-900">{title || 'Waiting for Game'}</h1>
+        <p className="text-sm text-gray-500">Waiting for game start</p>
       </div>
 
       <Card padding="lg" className="text-center space-y-2">
@@ -98,6 +98,7 @@ export function JoinLobby({
 
   return (
     <GameLayout
+      title={title}
       joinCode={joinCode}
       players={players}
       currentPlayerId={currentPlayerId}

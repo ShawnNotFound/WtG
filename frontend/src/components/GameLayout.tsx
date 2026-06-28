@@ -11,7 +11,7 @@ import { ScoreCard } from './ScoreCard';
 import { GameEnd } from './GameEnd';
 import { PlayerList } from './PlayerList';
 import { WorldHelperDrawer } from './WorldHelperDrawer';
-import { Badge, Button } from './ui';
+import { Button } from './ui';
 import {
   Headline,
   RoundSummary as RoundSummaryType,
@@ -22,6 +22,7 @@ import {
 import { useInGameNow } from '../hooks/useInGameNow';
 
 interface GameLayoutProps {
+  title: string;
   joinCode: string;
   players: any[];
   currentPlayerId: string;
@@ -51,6 +52,7 @@ interface GameLayoutProps {
 }
 
 export function GameLayout({
+  title,
   joinCode,
   players,
   currentPlayerId,
@@ -101,7 +103,7 @@ export function GameLayout({
     <div className="h-[100dvh] overflow-hidden flex flex-col bg-gradient-to-b from-gray-50 to-gray-100/80">
       <header className="shrink-0 z-20 bg-white/80 backdrop-blur border-b border-gray-100">
         <div className="max-w-7xl mx-auto px-4 py-2 flex items-center justify-between gap-4">
-          {/* left: session code + leave */}
+          {/* left: session title + leave */}
           <div className="flex items-center gap-3">
             <button
               onClick={onBack}
@@ -112,7 +114,12 @@ export function GameLayout({
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
               </svg>
             </button>
-            <Badge variant="default">{joinCode}</Badge>
+            <div className="min-w-0">
+              <div className="max-w-[180px] truncate text-sm font-semibold text-gray-900 sm:max-w-[260px]">
+                {title || 'Future Headlines'}
+              </div>
+              <div className="font-mono text-[11px] text-gray-400">{joinCode}</div>
+            </div>
           </div>
 
           {/* center: game status */}
@@ -171,6 +178,7 @@ export function GameLayout({
 
       {isFinished && (
         <GameEnd
+          title={title}
           joinCode={joinCode}
           players={players}
           headlines={headlines}

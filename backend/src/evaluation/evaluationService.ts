@@ -232,6 +232,7 @@ async function createEvaluationSession(
 
   const sessionResult = await client.query(
     `INSERT INTO game_sessions (
+       title,
        join_code,
        status,
        play_minutes,
@@ -242,9 +243,10 @@ async function createEvaluationSession(
        world_state_config,
        summary_config
      )
-     VALUES ($1, 'WAITING', $2, $3, $4, $5, $6, $7, $8)
+     VALUES ($1, $2, 'WAITING', $3, $4, $5, $6, $7, $8, $9)
      RETURNING id, join_code`,
     [
+      `Evaluation Run ${runIndex}`,
       joinCode,
       config.playMinutes,
       config.breakMinutes,
