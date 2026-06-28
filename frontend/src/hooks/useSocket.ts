@@ -45,6 +45,9 @@ interface SessionState {
     model?: string;
     baseUrl?: string;
   };
+  moduleLlmConfig?: Record<string, unknown>;
+  worldStateConfig?: Record<string, unknown>;
+  summaryConfig?: Record<string, unknown>;
   phase: string;
   isPaused: boolean;
   currentRound: number;
@@ -126,11 +129,61 @@ export interface FinalSummary {
   error: string | null;
 }
 
+export interface WorldHelperAnswer {
+  answerText: string;
+  headlineRefs: Array<{ id: string; reason: string }>;
+  entityRefs: Array<{ id: string; name: string; reason: string }>;
+  edgeRefs: Array<{
+    id: string;
+    sourceName: string;
+    targetName: string;
+    relationType: string;
+    reason: string;
+  }>;
+  graphSummary: {
+    note: string;
+    entities: Array<{ id: string; name: string; summary: string }>;
+    edges: Array<{
+      id: string;
+      sourceName: string;
+      targetName: string;
+      relationType: string;
+      summary: string;
+    }>;
+  };
+  suggestedQuestions: string[];
+  confidence: 'low' | 'medium' | 'high';
+}
+
+export interface WorldHelperMessage {
+  id: string;
+  sessionId: string;
+  playerId: string;
+  playerNickname?: string;
+  question: string;
+  streamedText: string;
+  answer: WorldHelperAnswer | null;
+  citedHeadlineIds: string[];
+  citedNodeIds: string[];
+  citedEdgeIds: string[];
+  status: 'pending' | 'streaming' | 'completed' | 'error';
+  model: string | null;
+  usage: Record<string, unknown>;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
 interface SubmitHeadlineResult {
   success: boolean;
   headline?: Headline;
   error?: string;
   cooldownMs?: number;
+}
+
+interface WorldHelperAskResult {
+  success: boolean;
+  error?: string;
 }
 
 interface UseSocketReturn {
@@ -140,6 +193,7 @@ interface UseSocketReturn {
   headlines: Headline[];
   roundSummary: RoundSummary | null;
   finalSummary: FinalSummary | null;
+  worldHelperMessages: WorldHelperMessage[];
   joinLobby: (joinCode: string, playerId: string) => Promise<boolean>;
   leaveLobby: () => void;
   startGame: (joinCode: string) => Promise<boolean>;
@@ -147,6 +201,8 @@ interface UseSocketReturn {
   loadHeadlines: (joinCode: string, roundNo?: number) => Promise<boolean>;
   requestSummary: (joinCode: string, roundNo: number) => Promise<boolean>;
   requestFinalSummary: (joinCode: string, roundNo: number) => Promise<boolean>;
+  loadWorldHelperHistory: (joinCode: string) => Promise<boolean>;
+  askWorldHelper: (joinCode: string, question: string) => Promise<WorldHelperAskResult>;
 }
 
 export function useSocket(): UseSocketReturn {
@@ -156,6 +212,7 @@ export function useSocket(): UseSocketReturn {
   const [headlines, setHeadlines] = useState<Headline[]>([]);
   const [roundSummary, setRoundSummary] = useState<RoundSummary | null>(null);
   const [finalSummary, setFinalSummary] = useState<FinalSummary | null>(null);
+  const [worldHelperMessages, setWorldHelperMessages] = useState<WorldHelperMessage[]>([]);
   const rejoinRef = useRef<{ joinCode: string; playerId: string } | null>(null);
 
   useEffect(() => {
@@ -308,6 +365,68 @@ export function useSocket(): UseSocketReturn {
       }
     });
 
+    const upsertHelperMessage = (
+      matcher: (message: WorldHelperMessage) => boolean,
+      patch: Partial<WorldHelperMessage>
+    ) => {
+      setWorldHelperMessages((prev) => {
+        const index = prev.findIndex(matcher);
+        if (index === -1) return prev;
+        const next = [...prev];
+        next[index] = { ...next[index], ...patch };
+        return next;
+      });
+    };
+
+    socket.on('world_helper:delta', (payload: {
+      messageId: string;
+      clientRequestId?: string;
+      delta: string;
+      text: string;
+    }) => {
+      const pendingId = payload.clientRequestId ? `pending:${payload.clientRequestId}` : '';
+      upsertHelperMessage(
+        (message) => message.id === payload.messageId || message.id === pendingId,
+        {
+          id: payload.messageId,
+          streamedText: payload.text,
+          status: 'streaming',
+          error: null,
+        }
+      );
+    });
+
+    socket.on('world_helper:complete', (payload: {
+      messageId: string;
+      clientRequestId?: string;
+      message: WorldHelperMessage;
+    }) => {
+      const pendingId = payload.clientRequestId ? `pending:${payload.clientRequestId}` : '';
+      setWorldHelperMessages((prev) => {
+        const index = prev.findIndex((message) => message.id === payload.messageId || message.id === pendingId);
+        if (index === -1) return [...prev, payload.message];
+        const next = [...prev];
+        next[index] = payload.message;
+        return next;
+      });
+    });
+
+    socket.on('world_helper:error', (payload: {
+      messageId?: string;
+      clientRequestId?: string;
+      error: string;
+    }) => {
+      const pendingId = payload.clientRequestId ? `pending:${payload.clientRequestId}` : '';
+      upsertHelperMessage(
+        (message) => Boolean(payload.messageId && message.id === payload.messageId) || message.id === pendingId,
+        {
+          id: payload.messageId ?? pendingId,
+          status: 'error',
+          error: payload.error,
+        }
+      );
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -345,6 +464,7 @@ export function useSocket(): UseSocketReturn {
       setHeadlines([]);
       setRoundSummary(null);
       setFinalSummary(null);
+      setWorldHelperMessages([]);
     }
   }, []);
 
@@ -475,6 +595,84 @@ export function useSocket(): UseSocketReturn {
     });
   }, []);
 
+  const loadWorldHelperHistory = useCallback(async (joinCode: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      if (!socketRef.current) {
+        resolve(false);
+        return;
+      }
+
+      socketRef.current.emit(
+        'world_helper:get_history',
+        { joinCode },
+        (response: { success: boolean; messages?: WorldHelperMessage[]; error?: string }) => {
+          if (response.success && response.messages) {
+            setWorldHelperMessages(response.messages);
+            resolve(true);
+          } else {
+            console.error('Failed to load world helper history:', response.error);
+            resolve(false);
+          }
+        }
+      );
+    });
+  }, []);
+
+  const askWorldHelper = useCallback(async (joinCode: string, question: string): Promise<WorldHelperAskResult> => {
+    return new Promise((resolve) => {
+      if (!socketRef.current) {
+        resolve({ success: false, error: 'Not connected' });
+        return;
+      }
+
+      const trimmedQuestion = question.trim();
+      if (!trimmedQuestion) {
+        resolve({ success: false, error: 'Question cannot be empty' });
+        return;
+      }
+
+      const clientRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const now = new Date().toISOString();
+      setWorldHelperMessages((prev) => [
+        ...prev,
+        {
+          id: `pending:${clientRequestId}`,
+          sessionId: sessionState?.id ?? '',
+          playerId: rejoinRef.current?.playerId ?? '',
+          question: trimmedQuestion,
+          streamedText: '',
+          answer: null,
+          citedHeadlineIds: [],
+          citedNodeIds: [],
+          citedEdgeIds: [],
+          status: 'streaming',
+          model: null,
+          usage: {},
+          error: null,
+          createdAt: now,
+          completedAt: null,
+        },
+      ]);
+
+      socketRef.current.emit(
+        'world_helper:ask',
+        { joinCode, question: trimmedQuestion, clientRequestId },
+        (response: WorldHelperAskResult) => {
+          if (!response.success) {
+            setWorldHelperMessages((prev) =>
+              prev.map((message) =>
+                message.id === `pending:${clientRequestId}`
+                  ? { ...message, status: 'error', error: response.error ?? 'World helper failed' }
+                  : message
+              )
+            );
+          }
+          resolve(response);
+        }
+      );
+    });
+  }, [sessionState?.id]);
+
   return {
     socket: socketRef.current,
     connected,
@@ -482,6 +680,7 @@ export function useSocket(): UseSocketReturn {
     headlines,
     roundSummary,
     finalSummary,
+    worldHelperMessages,
     joinLobby,
     leaveLobby,
     startGame,
@@ -489,6 +688,8 @@ export function useSocket(): UseSocketReturn {
     loadHeadlines,
     requestSummary,
     requestFinalSummary,
+    loadWorldHelperHistory,
+    askWorldHelper,
   };
 }
 

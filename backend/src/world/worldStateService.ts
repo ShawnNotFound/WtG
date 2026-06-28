@@ -337,7 +337,7 @@ function addUsage(stats: PropagationStats, model: string, usage?: { inputTokens:
 }
 
 async function getWorldClient(sessionId: string): Promise<JsonModelClient> {
-  const selection = await getSessionLlmSelection(sessionId);
+  const selection = await getSessionLlmSelection(sessionId, 'world');
   const config = getJsonProviderConfig('WORLD', selection);
   return createJsonModelClient(config);
 }
@@ -1309,7 +1309,9 @@ export async function getWorldStateForJoinCode(joinCode: string) {
        s.pause_remaining_ms,
        s.timeline_speed_ratio,
        s.llm_config,
+       s.module_llm_config,
        s.world_state_config,
+       s.summary_config,
        json_agg(
          json_build_object(
            'id', p.id,
@@ -1462,7 +1464,9 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       pauseRemainingMs: session.pause_remaining_ms,
       timelineSpeedRatio: session.timeline_speed_ratio,
       llmConfig: session.llm_config,
+      moduleLlmConfig: session.module_llm_config ?? {},
       worldStateConfig: normalizeWorldStateConfig(session.world_state_config),
+      summaryConfig: session.summary_config ?? {},
       players: session.players ?? [],
     },
     stats: {

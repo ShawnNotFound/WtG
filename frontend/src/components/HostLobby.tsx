@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { GameLayout } from './GameLayout';
 import { Card, Button, DropdownSelect } from './ui';
-import { Headline, RoundSummary as RoundSummaryType, FinalSummary } from '../hooks/useSocket';
+import { Headline, RoundSummary as RoundSummaryType, FinalSummary, WorldHelperMessage } from '../hooks/useSocket';
 import { useGameTimeProgress } from '../hooks/useGameTimeProgress';
 import {
   AiProvider,
@@ -45,10 +45,13 @@ interface HostLobbyProps {
   headlines: Headline[];
   roundSummary: RoundSummaryType | null;
   finalSummary: FinalSummary | null;
+  worldHelperMessages: WorldHelperMessage[];
   onStartGame: () => void;
   onBack: () => void;
   onRefreshLobby: () => Promise<boolean>;
   onSubmitHeadline: (headline: string) => Promise<{ success: boolean; error?: string; cooldownMs?: number }>;
+  onAskWorldHelper: (question: string) => Promise<{ success: boolean; error?: string }>;
+  onLoadWorldHelperHistory: () => Promise<boolean>;
 }
 
 interface AiDraft {
@@ -87,10 +90,13 @@ export function HostLobby({
   headlines,
   roundSummary,
   finalSummary,
+  worldHelperMessages,
   onStartGame,
   onBack,
   onRefreshLobby,
   onSubmitHeadline,
+  onAskWorldHelper,
+  onLoadWorldHelperHistory,
 }: HostLobbyProps) {
   const [copied, setCopied] = useState(false);
   const [aiDraft, setAiDraft] = useState<AiDraft>(defaultAiDraft);
@@ -425,6 +431,9 @@ export function HostLobby({
       totalGameMins={totalGameMins}
       currentGameMins={currentGameMins}
       onSubmitHeadline={onSubmitHeadline}
+      worldHelperMessages={worldHelperMessages}
+      onAskWorldHelper={onAskWorldHelper}
+      onLoadWorldHelperHistory={onLoadWorldHelperHistory}
       onBack={onBack}
       lobbyContent={lobbyContent}
     />

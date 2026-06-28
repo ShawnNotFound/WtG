@@ -12,6 +12,8 @@ import { DEFAULT_PLANETS } from '../game/scoringTypes.js';
 import { randomOrdinals } from '../game/planetUsage.js';
 import { DEFAULT_AI_PLAYER_CONFIG, normalizeAiPlayerConfig } from '../ai/aiPlayerService.js';
 import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
+import { normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
+import { normalizeWorldStateConfig } from '../world/worldStateService.js';
 
 const router = Router();
 
@@ -45,8 +47,25 @@ async function verifyHostWaitingSession(joinCode: string, hostPlayerId: string) 
  */
 router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
   try {
-    const { hostNickname, aiPlayers = [], llmConfig } = createSessionSchema.parse(req.body);
+    const {
+      hostNickname,
+      aiPlayers = [],
+      llmConfig,
+      moduleLlmConfig,
+      summaryConfig,
+      worldStateConfig,
+      playMinutes,
+      breakMinutes,
+      maxRounds,
+      timelineSpeedRatio,
+    } = createSessionSchema.parse(req.body);
     const normalizedLlmConfig = normalizeJsonModelSelection(llmConfig);
+    const normalizedModuleLlmConfig = normalizeModuleLlmConfig(moduleLlmConfig);
+    const normalizedWorldStateConfig = normalizeWorldStateConfig(worldStateConfig);
+    const normalizedSummaryConfig = {
+      roundSummaries: summaryConfig?.roundSummaries !== false,
+      finalNarrative: summaryConfig?.finalNarrative !== false,
+    };
 
     const joinCode = await generateUniqueJoinCode();
 
@@ -63,11 +82,24 @@ router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
           break_minutes,
           max_rounds,
           timeline_speed_ratio,
-          llm_config
+          llm_config,
+          module_llm_config,
+          world_state_config,
+          summary_config
         )
-         VALUES ($1, 'WAITING', $2, $3, $4, $5, $6)
-         RETURNING id, join_code, status, llm_config, created_at, updated_at`,
-        [joinCode, 8, 3, 4, 60.0, JSON.stringify(normalizedLlmConfig)]
+         VALUES ($1, 'WAITING', $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, join_code, status, llm_config, module_llm_config, world_state_config, summary_config, created_at, updated_at`,
+        [
+          joinCode,
+          playMinutes ?? 8,
+          breakMinutes ?? 3,
+          maxRounds ?? 4,
+          timelineSpeedRatio ?? 60.0,
+          JSON.stringify(normalizedLlmConfig),
+          JSON.stringify(normalizedModuleLlmConfig),
+          JSON.stringify(normalizedWorldStateConfig),
+          JSON.stringify(normalizedSummaryConfig),
+        ]
       );
       const session = sessionResult.rows[0];
 
@@ -116,6 +148,9 @@ router.post('/sessions', async (req: Request, res: Response): Promise<void> => {
           joinCode: session.join_code,
           status: session.status,
           llmConfig: session.llm_config,
+          moduleLlmConfig: session.module_llm_config,
+          worldStateConfig: session.world_state_config,
+          summaryConfig: session.summary_config,
           createdAt: session.created_at,
         },
         player: {
@@ -484,6 +519,9 @@ router.get('/sessions/:joinCode', async (req: Request, res: Response): Promise<v
         s.status,
         s.host_player_id,
         s.llm_config,
+        s.module_llm_config,
+        s.world_state_config,
+        s.summary_config,
         s.created_at,
         s.updated_at,
         json_agg(
@@ -516,6 +554,9 @@ router.get('/sessions/:joinCode', async (req: Request, res: Response): Promise<v
       status: session.status,
       hostPlayerId: session.host_player_id,
       llmConfig: session.llm_config,
+      moduleLlmConfig: session.module_llm_config,
+      worldStateConfig: session.world_state_config,
+      summaryConfig: session.summary_config,
       createdAt: session.created_at,
       updatedAt: session.updated_at,
       players: session.players.filter((p: any) => p.id !== null), // filter out null players from left join

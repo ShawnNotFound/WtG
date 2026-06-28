@@ -5,6 +5,8 @@ interface UseInGameNowOptions {
   inGameNow: string | null;
   /** server timestamp that accompanied the snapshot (iso string). */
   serverNow: string;
+  /** real-world phase end timestamp. Used to stop local ticking while phase transition waits on backend work. */
+  phaseEndsAt?: string | null;
   /** how many in-game seconds per real-world second. */
   timelineSpeedRatio: number;
   /** only tick while true (e.g. during playing/break). */
@@ -19,6 +21,7 @@ interface UseInGameNowOptions {
 export function useInGameNow({
   inGameNow,
   serverNow,
+  phaseEndsAt = null,
   timelineSpeedRatio,
   enabled = true,
 }: UseInGameNowOptions): string | null {
@@ -61,7 +64,14 @@ export function useInGameNow({
       if (snap.inGameTime === 0) return;
 
       // scale real elapsed by timelinespeedratio to get in-game elapsed
-      const realElapsedMs = Date.now() - snap.clientTime;
+      let realElapsedMs = Date.now() - snap.clientTime;
+      if (phaseEndsAt) {
+        const phaseEndMs = new Date(phaseEndsAt).getTime();
+        const maxElapsedMs = phaseEndMs - snap.serverTime;
+        if (Number.isFinite(maxElapsedMs)) {
+          realElapsedMs = Math.min(realElapsedMs, Math.max(0, maxElapsedMs));
+        }
+      }
       const inGameElapsedMs = realElapsedMs * timelineSpeedRatio;
       const newInGameTime = snap.inGameTime + inGameElapsedMs;
 
@@ -77,7 +87,7 @@ export function useInGameNow({
         clearInterval(intervalRef.current);
       }
     };
-  }, [enabled, inGameNow, timelineSpeedRatio]);
+  }, [enabled, inGameNow, phaseEndsAt, timelineSpeedRatio]);
 
   return derived;
 }

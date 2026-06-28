@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useState } from 'react';
 import { GameStatus } from './GameStatus';
 import { PersonalScore } from './PersonalScore';
 import { ScoreBarChart } from './ScoreBarChart';
@@ -10,8 +10,15 @@ import { RoundSummary } from './RoundSummary';
 import { ScoreCard } from './ScoreCard';
 import { GameEnd } from './GameEnd';
 import { PlayerList } from './PlayerList';
-import { Badge } from './ui';
-import { Headline, RoundSummary as RoundSummaryType, FinalSummary, PlanetPanelEntry } from '../hooks/useSocket';
+import { WorldHelperDrawer } from './WorldHelperDrawer';
+import { Badge, Button } from './ui';
+import {
+  Headline,
+  RoundSummary as RoundSummaryType,
+  FinalSummary,
+  PlanetPanelEntry,
+  WorldHelperMessage,
+} from '../hooks/useSocket';
 import { useInGameNow } from '../hooks/useInGameNow';
 
 interface GameLayoutProps {
@@ -35,6 +42,9 @@ interface GameLayoutProps {
   totalGameMins: number;
   currentGameMins: number;
   onSubmitHeadline: (headline: string) => Promise<{ success: boolean; error?: string; cooldownMs?: number }>;
+  worldHelperMessages: WorldHelperMessage[];
+  onAskWorldHelper: (question: string) => Promise<{ success: boolean; error?: string }>;
+  onLoadWorldHelperHistory: () => Promise<boolean>;
   onBack: () => void;
   /* lobby-specific slot */
   lobbyContent?: React.ReactNode;
@@ -61,16 +71,28 @@ export function GameLayout({
   totalGameMins,
   currentGameMins,
   onSubmitHeadline,
+  worldHelperMessages,
+  onAskWorldHelper,
+  onLoadWorldHelperHistory,
   onBack,
   lobbyContent,
 }: GameLayoutProps) {
+  const [helperOpen, setHelperOpen] = useState(false);
+  const [focusHeadlineId, setFocusHeadlineId] = useState<string | null>(null);
+  const [focusSignal, setFocusSignal] = useState(0);
   const isWaiting = phase === 'WAITING';
   const isFinished = phase === 'FINISHED';
   const inGame = !isWaiting && !isFinished;
 
+  const focusHeadline = useCallback((headlineId: string) => {
+    setFocusHeadlineId(headlineId);
+    setFocusSignal((current) => current + 1);
+  }, []);
+
   const derivedInGameNow = useInGameNow({
     inGameNow,
     serverNow,
+    phaseEndsAt,
     timelineSpeedRatio,
     enabled: phase === 'PLAYING' && !isPaused,
   });
@@ -109,8 +131,24 @@ export function GameLayout({
             </div>
           )}
 
-          {/* right: personal score */}
-          {inGame && <PersonalScore score={myScore} />}
+          {/* right: helper + personal score */}
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setHelperOpen(true)}
+              className="gap-1.5"
+              title="Open world helper"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 20 20" stroke="currentColor" strokeWidth={1.8}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 5.5A2.5 2.5 0 016.5 3h7A2.5 2.5 0 0116 5.5v5A2.5 2.5 0 0113.5 13H9l-3.5 3v-3A2.5 2.5 0 014 10.5v-5z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 7h6M7 10h3" />
+              </svg>
+              <span className="hidden sm:inline">World</span>
+            </Button>
+            {inGame && <PersonalScore score={myScore} />}
+          </div>
         </div>
       </header>
 
@@ -141,6 +179,8 @@ export function GameLayout({
           totalGameMins={totalGameMins}
           currentGameMins={currentGameMins}
           finalSummary={finalSummary}
+          focusHeadlineId={focusHeadlineId}
+          focusSignal={focusSignal}
           onBack={onBack}
         />
       )}
@@ -170,6 +210,8 @@ export function GameLayout({
                 <HeadlineFeed
                   headlines={headlines}
                   currentPlayerId={currentPlayerId}
+                  focusHeadlineId={focusHeadlineId}
+                  focusSignal={focusSignal}
                 />
               </div>
               {phase === 'TUTORIAL' && (
@@ -201,6 +243,8 @@ export function GameLayout({
               <HeadlineFeed
                 headlines={headlines}
                 currentPlayerId={currentPlayerId}
+                focusHeadlineId={focusHeadlineId}
+                focusSignal={focusSignal}
               />
               <ScoreBarChart
                 players={players}
@@ -230,6 +274,17 @@ export function GameLayout({
           </div>
         </main>
       )}
+
+      <WorldHelperDrawer
+        open={helperOpen}
+        joinCode={joinCode}
+        messages={worldHelperMessages}
+        headlines={headlines}
+        onClose={() => setHelperOpen(false)}
+        onAsk={onAskWorldHelper}
+        onLoadHistory={onLoadWorldHelperHistory}
+        onFocusHeadline={focusHeadline}
+      />
     </div>
   );
 }

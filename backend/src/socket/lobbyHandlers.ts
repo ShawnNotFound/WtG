@@ -1,6 +1,6 @@
 import { Server, Socket } from 'socket.io';
 import pool from '../db/pool.js';
-import { submitHeadlineSchema } from '../utils/validation.js';
+import { joinCodeSchema, submitHeadlineSchema, worldHelperAskSchema } from '../utils/validation.js';
 import { ZodError } from 'zod';
 import { transformHeadline, LinkedHeadline } from '../game/headlineTransformationService.js';
 import { getDefaultPlanets } from '../game/planets.js';
@@ -23,6 +23,10 @@ import {
   getHeadlineCooldownMs,
   clearSessionRateLimits,
 } from '../game/headlineCooldown.js';
+import {
+  askWorldHelper,
+  getWorldHelperHistory,
+} from '../world/worldHelperService.js';
 
 export { clearSessionRateLimits };
 
@@ -96,6 +100,9 @@ interface SessionState {
     model?: string;
     baseUrl?: string;
   };
+  moduleLlmConfig?: Record<string, unknown>;
+  worldStateConfig?: Record<string, unknown>;
+  summaryConfig?: Record<string, unknown>;
   phase: string;
   isPaused: boolean;
   currentRound: number;
@@ -145,6 +152,9 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
         s.status,
         s.host_player_id,
         s.llm_config,
+        s.module_llm_config,
+        s.world_state_config,
+        s.summary_config,
         s.phase,
         s.is_paused,
         s.current_round,
@@ -225,6 +235,9 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
       status: session.status,
       hostPlayerId: session.host_player_id,
       llmConfig: session.llm_config,
+      moduleLlmConfig: session.module_llm_config ?? {},
+      worldStateConfig: session.world_state_config ?? {},
+      summaryConfig: session.summary_config ?? {},
       phase: session.phase,
       isPaused: session.is_paused === true,
       currentRound: session.current_round,
@@ -461,6 +474,107 @@ export function setupLobbyHandlers(io: Server): void {
         socket.data.joinCode = undefined;
         socket.data.playerId = undefined;
         console.log(`Socket ${socket.id} left lobby ${joinCode}`);
+      }
+    });
+
+    socket.on('world_helper:get_history', async (data: { joinCode: string }, callback) => {
+      try {
+        const playerId = socket.data.playerId;
+        if (!playerId) {
+          callback?.({ success: false, error: 'Not authenticated - please join a lobby first' });
+          return;
+        }
+
+        const joinCode = joinCodeSchema.parse(String(data?.joinCode ?? '').toUpperCase());
+        const sessionState = await getSessionState(joinCode);
+        if (!sessionState) {
+          callback?.({ success: false, error: 'Session not found' });
+          return;
+        }
+
+        const player = sessionState.players.find((entry) => entry.id === playerId);
+        if (!player) {
+          callback?.({ success: false, error: 'Player not in this session' });
+          return;
+        }
+
+        const messages = await getWorldHelperHistory(sessionState.id, playerId);
+        callback?.({ success: true, messages });
+      } catch (error) {
+        if (error instanceof ZodError) {
+          callback?.({ success: false, error: error.errors[0]?.message || 'Invalid input' });
+          return;
+        }
+        console.error('Error in world_helper:get_history:', error);
+        callback?.({ success: false, error: 'Failed to load helper history' });
+      }
+    });
+
+    socket.on('world_helper:ask', async (data: { joinCode: string; question: string; clientRequestId?: string }, callback) => {
+      try {
+        const playerId = socket.data.playerId;
+        if (!playerId) {
+          callback?.({ success: false, error: 'Not authenticated - please join a lobby first' });
+          return;
+        }
+
+        let validatedData;
+        try {
+          validatedData = worldHelperAskSchema.parse({
+            ...data,
+            joinCode: String(data?.joinCode ?? '').toUpperCase(),
+          });
+        } catch (err) {
+          if (err instanceof ZodError) {
+            callback?.({ success: false, error: err.errors[0]?.message || 'Invalid input' });
+            return;
+          }
+          throw err;
+        }
+
+        const sessionState = await getSessionState(validatedData.joinCode);
+        if (!sessionState) {
+          callback?.({ success: false, error: 'Session not found' });
+          return;
+        }
+
+        const player = sessionState.players.find((entry) => entry.id === playerId);
+        if (!player) {
+          callback?.({ success: false, error: 'Player not in this session' });
+          return;
+        }
+
+        callback?.({ success: true });
+
+        askWorldHelper(
+          {
+            sessionId: sessionState.id,
+            joinCode: validatedData.joinCode,
+            playerId,
+            question: validatedData.question,
+            clientRequestId: validatedData.clientRequestId,
+          },
+          {
+            onDelta: (payload) => {
+              socket.emit('world_helper:delta', payload);
+            },
+            onComplete: (payload) => {
+              socket.emit('world_helper:complete', payload);
+            },
+            onError: (payload) => {
+              socket.emit('world_helper:error', payload);
+            },
+          }
+        ).catch((error) => {
+          console.error(`[WorldHelper ${validatedData.joinCode}] Unhandled helper error:`, error);
+          socket.emit('world_helper:error', {
+            clientRequestId: validatedData.clientRequestId,
+            error: 'World helper failed',
+          });
+        });
+      } catch (error) {
+        console.error('Error in world_helper:ask:', error);
+        callback?.({ success: false, error: 'Failed to ask world helper' });
       }
     });
 

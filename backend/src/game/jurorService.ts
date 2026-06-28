@@ -134,7 +134,7 @@ async function getClient(sessionId?: string): Promise<JsonModelClient> {
     return clientInstance;
   }
 
-  const selection = sessionId ? await getSessionLlmSelection(sessionId) : undefined;
+  const selection = sessionId ? await getSessionLlmSelection(sessionId, 'juror') : undefined;
   const config = getJsonProviderConfig('JUROR', selection);
   if (!config.apiKey) {
     throw new OpenAIError(

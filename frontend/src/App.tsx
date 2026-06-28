@@ -47,6 +47,36 @@ interface LlmConfig {
   baseUrl: string;
 }
 
+type ModuleLlmName = 'juror' | 'world' | 'summary' | 'helper';
+
+interface WorldStateConfig {
+  enabled: boolean;
+  allowCycles: boolean;
+  maxPropagationDepth: number;
+  maxNodeReactions: number;
+  maxEventsPerNode: number;
+  nodeAgentConcurrency: number;
+  storeUnaffectedDecisions: boolean;
+}
+
+interface SummaryConfig {
+  roundSummaries: boolean;
+  finalNarrative: boolean;
+}
+
+const MODULE_LLM_LABELS: Array<{ key: ModuleLlmName; label: string }> = [
+  { key: 'juror', label: 'Juror' },
+  { key: 'world', label: 'World Graph' },
+  { key: 'summary', label: 'Summaries' },
+  { key: 'helper', label: 'World Helper' },
+];
+
+const createDefaultLlmConfig = (provider: AiProvider = 'deepseek'): LlmConfig => ({
+  provider,
+  model: defaultModelForProvider(provider),
+  baseUrl: baseUrlForProvider(provider),
+});
+
 const createInitialAiPlayer = (index: number): InitialAiPlayer => ({
   nickname: `AI Player ${index + 1}`,
   stylePrompt: 'Strategic, grounded, specific, and slightly provocative.',
@@ -67,6 +97,30 @@ function App() {
     model: defaultModelForProvider('deepseek'),
     baseUrl: baseUrlForProvider('deepseek'),
   });
+  const [showAdvancedConfig, setShowAdvancedConfig] = useState(false);
+  const [playMinutes, setPlayMinutes] = useState(8);
+  const [breakMinutes, setBreakMinutes] = useState(3);
+  const [maxRounds, setMaxRounds] = useState(4);
+  const [timelineSpeedRatio, setTimelineSpeedRatio] = useState(60);
+  const [summaryConfig, setSummaryConfig] = useState<SummaryConfig>({
+    roundSummaries: true,
+    finalNarrative: true,
+  });
+  const [worldStateConfig, setWorldStateConfig] = useState<WorldStateConfig>({
+    enabled: true,
+    allowCycles: true,
+    maxPropagationDepth: 2,
+    maxNodeReactions: 20,
+    maxEventsPerNode: 2,
+    nodeAgentConcurrency: 4,
+    storeUnaffectedDecisions: true,
+  });
+  const [moduleLlmConfig, setModuleLlmConfig] = useState<Record<ModuleLlmName, LlmConfig>>({
+    juror: createDefaultLlmConfig(),
+    world: createDefaultLlmConfig(),
+    summary: createDefaultLlmConfig(),
+    helper: createDefaultLlmConfig(),
+  });
   const [initialAiPlayers, setInitialAiPlayers] = useState<InitialAiPlayer[]>([]);
 
   const [sessionData, setSessionData] = useState<{
@@ -75,7 +129,23 @@ function App() {
     isHost: boolean;
   } | null>(null);
 
-  const { connected, sessionState, headlines, roundSummary, finalSummary, joinLobby, leaveLobby, startGame, submitHeadline, loadHeadlines, requestSummary, requestFinalSummary } = useSocket();
+  const {
+    connected,
+    sessionState,
+    headlines,
+    roundSummary,
+    finalSummary,
+    worldHelperMessages,
+    joinLobby,
+    leaveLobby,
+    startGame,
+    submitHeadline,
+    loadHeadlines,
+    requestSummary,
+    requestFinalSummary,
+    loadWorldHelperHistory,
+    askWorldHelper,
+  } = useSocket();
 
   // load session from localstorage on mount
   useEffect(() => {
@@ -132,6 +202,25 @@ function App() {
             model: llmConfig.model || defaultModelForProvider(llmConfig.provider),
             baseUrl: llmConfig.baseUrl.trim() || baseUrlForProvider(llmConfig.provider),
           },
+          moduleLlmConfig: Object.fromEntries(
+            MODULE_LLM_LABELS.map(({ key }) => {
+              const config = moduleLlmConfig[key];
+              return [
+                key,
+                {
+                  ...config,
+                  model: config.model || defaultModelForProvider(config.provider),
+                  baseUrl: config.baseUrl.trim() || baseUrlForProvider(config.provider),
+                },
+              ];
+            })
+          ),
+          summaryConfig,
+          worldStateConfig,
+          playMinutes,
+          breakMinutes,
+          maxRounds,
+          timelineSpeedRatio,
           aiPlayers: initialAiPlayers.map((player, index) => ({
             ...player,
             nickname: player.nickname.trim() || `AI Player ${index + 1}`,
@@ -260,6 +349,24 @@ function App() {
     );
   };
 
+  const updateModuleLlmConfig = (moduleName: ModuleLlmName, patch: Partial<LlmConfig>) => {
+    setModuleLlmConfig((prev) => ({
+      ...prev,
+      [moduleName]: {
+        ...prev[moduleName],
+        ...patch,
+      },
+    }));
+  };
+
+  const updateModuleProvider = (moduleName: ModuleLlmName, provider: AiProvider) => {
+    updateModuleLlmConfig(moduleName, {
+      provider,
+      model: defaultModelForProvider(provider),
+      baseUrl: baseUrlForProvider(provider),
+    });
+  };
+
   const handleStartGame = async () => {
     if (!sessionData) return;
     const success = await startGame(sessionData.joinCode);
@@ -269,6 +376,16 @@ function App() {
   const handleSubmitHeadline = async (headline: string) => {
     if (!sessionData) return { success: false, error: 'Not connected to a session' };
     return submitHeadline(sessionData.joinCode, headline);
+  };
+
+  const handleAskWorldHelper = async (question: string) => {
+    if (!sessionData) return { success: false, error: 'Not connected to a session' };
+    return askWorldHelper(sessionData.joinCode, question);
+  };
+
+  const handleLoadWorldHelperHistory = async () => {
+    if (!sessionData) return false;
+    return loadWorldHelperHistory(sessionData.joinCode);
   };
 
   const handleRefreshLobby = async () => {
@@ -333,10 +450,13 @@ function App() {
         headlines={headlines}
         roundSummary={roundSummary}
         finalSummary={finalSummary}
+        worldHelperMessages={worldHelperMessages}
         onStartGame={handleStartGame}
         onBack={handleBack}
         onRefreshLobby={handleRefreshLobby}
         onSubmitHeadline={handleSubmitHeadline}
+        onAskWorldHelper={handleAskWorldHelper}
+        onLoadWorldHelperHistory={handleLoadWorldHelperHistory}
       />
     ) : (
       <JoinLobby
@@ -358,8 +478,11 @@ function App() {
         headlines={headlines}
         roundSummary={roundSummary}
         finalSummary={finalSummary}
+        worldHelperMessages={worldHelperMessages}
         onBack={handleBack}
         onSubmitHeadline={handleSubmitHeadline}
+        onAskWorldHelper={handleAskWorldHelper}
+        onLoadWorldHelperHistory={handleLoadWorldHelperHistory}
       />
     )
   ) : (
@@ -435,6 +558,217 @@ function App() {
                   className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-gray-50 focus:outline-none focus:ring-2 focus:ring-indigo-400"
                   aria-label="Game AI base URL"
                 />
+              </div>
+
+              <div className="space-y-3 border-t border-gray-100 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvancedConfig((current) => !current)}
+                  className="flex w-full items-center justify-between rounded-lg px-1 py-1 text-left"
+                >
+                  <span className="text-xs font-medium uppercase tracking-wider text-gray-500">
+                    Advanced Configuration
+                  </span>
+                  <svg
+                    className={`h-4 w-4 text-gray-400 transition-transform ${showAdvancedConfig ? 'rotate-180' : ''}`}
+                    fill="none"
+                    viewBox="0 0 20 20"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 7.5 10 12.5 15 7.5" />
+                  </svg>
+                </button>
+
+                {showAdvancedConfig && (
+                  <div className="space-y-4 rounded-lg border border-gray-100 bg-gray-50/60 p-3">
+                    <div className="grid gap-2 sm:grid-cols-4">
+                      <label className="text-xs text-gray-500">
+                        Play minutes
+                        <input
+                          type="number"
+                          min={0.1}
+                          max={120}
+                          step={0.1}
+                          value={playMinutes}
+                          onChange={(e) => setPlayMinutes(Number(e.target.value))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Break minutes
+                        <input
+                          type="number"
+                          min={0}
+                          max={60}
+                          step={0.1}
+                          value={breakMinutes}
+                          onChange={(e) => setBreakMinutes(Number(e.target.value))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Max rounds
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={maxRounds}
+                          onChange={(e) => setMaxRounds(Number(e.target.value))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Timeline speed
+                        <input
+                          type="number"
+                          min={0}
+                          max={100000}
+                          value={timelineSpeedRatio}
+                          onChange={(e) => setTimelineSpeedRatio(Number(e.target.value))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="flex items-center justify-between rounded-lg border border-gray-100 bg-white px-3 py-2 text-sm text-gray-700">
+                        World graph enabled
+                        <input
+                          type="checkbox"
+                          checked={worldStateConfig.enabled}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, enabled: e.target.checked }))}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between rounded-lg border border-gray-100 bg-white px-3 py-2 text-sm text-gray-700">
+                        Allow graph cycles
+                        <input
+                          type="checkbox"
+                          checked={worldStateConfig.allowCycles}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, allowCycles: e.target.checked }))}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between rounded-lg border border-gray-100 bg-white px-3 py-2 text-sm text-gray-700">
+                        Round summaries
+                        <input
+                          type="checkbox"
+                          checked={summaryConfig.roundSummaries}
+                          onChange={(e) => setSummaryConfig((prev) => ({ ...prev, roundSummaries: e.target.checked }))}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between rounded-lg border border-gray-100 bg-white px-3 py-2 text-sm text-gray-700">
+                        Final narrative
+                        <input
+                          type="checkbox"
+                          checked={summaryConfig.finalNarrative}
+                          onChange={(e) => setSummaryConfig((prev) => ({ ...prev, finalNarrative: e.target.checked }))}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                      </label>
+                    </div>
+
+                    <div className="grid gap-2 sm:grid-cols-5">
+                      <label className="text-xs text-gray-500">
+                        Depth
+                        <input
+                          type="number"
+                          min={0}
+                          max={8}
+                          value={worldStateConfig.maxPropagationDepth}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxPropagationDepth: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Reactions
+                        <input
+                          type="number"
+                          min={1}
+                          max={200}
+                          value={worldStateConfig.maxNodeReactions}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxNodeReactions: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Events/node
+                        <input
+                          type="number"
+                          min={1}
+                          max={20}
+                          value={worldStateConfig.maxEventsPerNode}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxEventsPerNode: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Concurrency
+                        <input
+                          type="number"
+                          min={1}
+                          max={16}
+                          value={worldStateConfig.nodeAgentConcurrency}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, nodeAgentConcurrency: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="flex items-end gap-2 pb-1 text-xs text-gray-500">
+                        <input
+                          type="checkbox"
+                          checked={worldStateConfig.storeUnaffectedDecisions}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, storeUnaffectedDecisions: e.target.checked }))}
+                          className="h-4 w-4 accent-indigo-600"
+                        />
+                        Store unaffected
+                      </label>
+                    </div>
+
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
+                        Module LLM Overrides
+                      </p>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {MODULE_LLM_LABELS.map(({ key, label }) => {
+                          const config = moduleLlmConfig[key];
+                          return (
+                            <div key={key} className="space-y-2 rounded-lg border border-gray-100 bg-white p-3">
+                              <p className="text-xs font-medium text-gray-500">{label}</p>
+                              <div className="grid grid-cols-2 gap-2">
+                                <DropdownSelect
+                                  value={config.provider}
+                                  options={PROVIDER_OPTIONS}
+                                  onChange={(value) => updateModuleProvider(key, value as AiProvider)}
+                                  ariaLabel={`${label} provider`}
+                                  size="sm"
+                                  menuClassName="z-[70]"
+                                />
+                                <DropdownSelect
+                                  value={config.model}
+                                  options={modelOptionsForProvider(config.provider)}
+                                  onChange={(value) => updateModuleLlmConfig(key, { model: value })}
+                                  ariaLabel={`${label} model`}
+                                  size="sm"
+                                  menuClassName="z-[70]"
+                                />
+                              </div>
+                              <input
+                                type="text"
+                                value={config.baseUrl}
+                                onChange={(e) => updateModuleLlmConfig(key, { baseUrl: e.target.value })}
+                                maxLength={200}
+                                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                                aria-label={`${label} base URL`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-3 border-t border-gray-100 pt-4">

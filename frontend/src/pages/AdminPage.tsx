@@ -1,20 +1,34 @@
 import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
+  BaseEdge,
   Controls,
+  getBezierPath,
   Handle,
   MarkerType,
-  MiniMap,
   Position,
   ReactFlow,
   ReactFlowProvider,
+  useInternalNode,
   useNodesInitialized,
   useReactFlow,
   type Edge as FlowEdge,
+  type EdgeProps,
+  type InternalNode,
   type Node as FlowNode,
   type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
+import {
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  forceX,
+  forceY,
+  type SimulationLinkDatum,
+  type SimulationNodeDatum,
+} from 'd3-force';
 import { Badge, Button, Card, DropdownSelect } from '../components/ui';
 import {
   AiProvider,
@@ -23,6 +37,7 @@ import {
   modelOptionsForValue,
 } from '../lib/modelOptions';
 import { useNavigate } from 'react-router-dom';
+import type { WorldHelperMessage } from '../hooks/useSocket';
 
 const API_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 
@@ -151,6 +166,15 @@ interface WorldStateResponse {
       model?: string;
       baseUrl?: string;
     };
+    moduleLlmConfig?: Partial<Record<ModuleLlmName, {
+      provider?: AiProvider;
+      model?: string;
+      baseUrl?: string;
+    }>>;
+    summaryConfig?: {
+      roundSummaries?: boolean;
+      finalNarrative?: boolean;
+    };
     worldStateConfig?: {
       enabled?: boolean;
       allowCycles?: boolean;
@@ -187,6 +211,21 @@ interface AiDraft {
   model: string;
 }
 
+type ModuleLlmName = 'juror' | 'world' | 'summary' | 'helper';
+
+const MODULE_LLM_LABELS: Array<{ key: ModuleLlmName; label: string }> = [
+  { key: 'juror', label: 'Juror' },
+  { key: 'world', label: 'World Graph' },
+  { key: 'summary', label: 'Summaries' },
+  { key: 'helper', label: 'World Helper' },
+];
+
+interface LlmDraft {
+  provider: AiProvider;
+  model: string;
+  baseUrl: string;
+}
+
 interface ConfigDraft {
   playMinutes: string;
   breakMinutes: string;
@@ -199,9 +238,12 @@ interface ConfigDraft {
   maxEventsPerNode: string;
   nodeAgentConcurrency: string;
   storeUnaffectedDecisions: boolean;
+  roundSummaries: boolean;
+  finalNarrative: boolean;
   provider: AiProvider;
   model: string;
   baseUrl: string;
+  moduleLlmConfig: Record<ModuleLlmName, LlmDraft>;
   aiPlayers: Record<string, AiDraft>;
 }
 
@@ -209,9 +251,28 @@ function normalizeProvider(value: unknown): AiProvider {
   return value === 'openai' ? 'openai' : 'deepseek';
 }
 
+function draftLlmConfig(raw: unknown, fallback?: LlmDraft): LlmDraft {
+  const source = raw && typeof raw === 'object'
+    ? raw as Partial<LlmDraft>
+    : {};
+  const provider = normalizeProvider(source.provider ?? fallback?.provider);
+  return {
+    provider,
+    model: source.model ?? fallback?.model ?? defaultModelForProvider(provider),
+    baseUrl: source.baseUrl ?? fallback?.baseUrl ?? baseUrlForProvider(provider),
+  };
+}
+
 function draftFromState(state: WorldStateResponse): ConfigDraft {
   const provider = normalizeProvider(state.session.llmConfig?.provider);
   const worldStateConfig = state.session.worldStateConfig ?? {};
+  const sharedLlm = draftLlmConfig(state.session.llmConfig);
+  const moduleLlmConfig = Object.fromEntries(
+    MODULE_LLM_LABELS.map(({ key }) => [
+      key,
+      draftLlmConfig(state.session.moduleLlmConfig?.[key], sharedLlm),
+    ])
+  ) as Record<ModuleLlmName, LlmDraft>;
   const aiPlayers: Record<string, AiDraft> = {};
 
   for (const player of state.session.players.filter((p) => p.isAi)) {
@@ -238,9 +299,12 @@ function draftFromState(state: WorldStateResponse): ConfigDraft {
     maxEventsPerNode: String(worldStateConfig.maxEventsPerNode ?? 2),
     nodeAgentConcurrency: String(worldStateConfig.nodeAgentConcurrency ?? 4),
     storeUnaffectedDecisions: worldStateConfig.storeUnaffectedDecisions !== false,
+    roundSummaries: state.session.summaryConfig?.roundSummaries !== false,
+    finalNarrative: state.session.summaryConfig?.finalNarrative !== false,
     provider,
     model: state.session.llmConfig?.model ?? defaultModelForProvider(provider),
     baseUrl: state.session.llmConfig?.baseUrl ?? baseUrlForProvider(provider),
+    moduleLlmConfig,
     aiPlayers,
   };
 }
@@ -345,7 +409,7 @@ interface GraphNodeData extends Record<string, unknown> {
 }
 
 type WorldGraphFlowNode = FlowNode<GraphNodeData, 'worldNode'>;
-type WorldGraphFlowEdge = FlowEdge<{ edge: WorldEdge }, 'smoothstep'>;
+type WorldGraphFlowEdge = FlowEdge<{ edge: WorldEdge }, 'floating'>;
 
 function WorldGraphNode({ data, selected }: NodeProps<WorldGraphFlowNode>) {
   const { node, highlightDepth } = data;
@@ -363,8 +427,9 @@ function WorldGraphNode({ data, selected }: NodeProps<WorldGraphFlowNode>) {
         selected ? 'ring-2 ring-indigo-400 ring-offset-2' : ''
       } ${highlightClass}`}
     >
-      <Handle type="target" position={Position.Left} className="!h-2.5 !w-2.5 !bg-gray-400" />
-      <Handle type="source" position={Position.Right} className="!h-2.5 !w-2.5 !bg-gray-400" />
+      {/* Floating edges attach at the card border, so the handles are hidden anchors only. */}
+      <Handle type="target" position={Position.Left} isConnectable={false} className="!h-1 !w-1 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" />
+      <Handle type="source" position={Position.Right} isConnectable={false} className="!h-1 !w-1 !min-h-0 !min-w-0 !border-0 !bg-transparent !opacity-0" />
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-gray-900" title={node.name}>
@@ -381,71 +446,156 @@ function WorldGraphNode({ data, selected }: NodeProps<WorldGraphFlowNode>) {
 
 const worldGraphNodeTypes = { worldNode: WorldGraphNode };
 
-function buildLayeredGraphPositions(nodes: WorldNode[], edges: WorldEdge[]): Map<string, { x: number; y: number }> {
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const incoming = new Map<string, string[]>();
-  const outgoing = new Map<string, string[]>();
-  const indegree = new Map<string, number>();
+// --- Floating edges -------------------------------------------------------
+// React Flow's built-in edges attach to fixed handles, which looks broken on an
+// organic (force-directed) layout where neighbours sit in any direction. A
+// floating edge instead connects to the point where the centre-to-centre line
+// crosses each node's border, so arrows always face the right way.
 
-  nodes.forEach((node) => {
-    incoming.set(node.id, []);
-    outgoing.set(node.id, []);
-    indegree.set(node.id, 0);
-  });
+function nodeBox(node: InternalNode<WorldGraphFlowNode>) {
+  const width = node.measured.width ?? 240;
+  const height = node.measured.height ?? 120;
+  const { x, y } = node.internals.positionAbsolute;
+  return { cx: x + width / 2, cy: y + height / 2, width, height };
+}
 
-  for (const edge of edges) {
-    if (!nodeIds.has(edge.sourceNodeId) || !nodeIds.has(edge.targetNodeId)) continue;
-    outgoing.get(edge.sourceNodeId)?.push(edge.targetNodeId);
-    incoming.get(edge.targetNodeId)?.push(edge.sourceNodeId);
-    indegree.set(edge.targetNodeId, (indegree.get(edge.targetNodeId) ?? 0) + 1);
+// Where the line from `source` centre towards `target` centre meets the source box.
+function getBorderPoint(
+  source: InternalNode<WorldGraphFlowNode>,
+  target: InternalNode<WorldGraphFlowNode>
+): { x: number; y: number } {
+  const s = nodeBox(source);
+  const t = nodeBox(target);
+  const dx = t.cx - s.cx;
+  const dy = t.cy - s.cy;
+  if (dx === 0 && dy === 0) return { x: s.cx, y: s.cy };
+  const scale = 1 / Math.max(Math.abs(dx) / (s.width / 2), Math.abs(dy) / (s.height / 2));
+  return { x: s.cx + dx * scale, y: s.cy + dy * scale };
+}
+
+function getBorderSide(node: InternalNode<WorldGraphFlowNode>, point: { x: number; y: number }): Position {
+  const { cx, cy, width, height } = nodeBox(node);
+  const dx = point.x - cx;
+  const dy = point.y - cy;
+  if (Math.abs(dx) / width >= Math.abs(dy) / height) {
+    return dx >= 0 ? Position.Right : Position.Left;
   }
+  return dy >= 0 ? Position.Bottom : Position.Top;
+}
 
-  const levels = new Map(nodes.map((node) => [node.id, 0]));
-  const queue = nodes
-    .filter((node) => (indegree.get(node.id) ?? 0) === 0)
-    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
-    .map((node) => node.id);
-  const visited = new Set<string>();
+function FloatingWorldEdge({
+  id,
+  source,
+  target,
+  markerEnd,
+  style,
+  interactionWidth,
+  label,
+  labelStyle,
+  labelShowBg,
+  labelBgStyle,
+  labelBgPadding,
+  labelBgBorderRadius,
+}: EdgeProps<WorldGraphFlowEdge>) {
+  const sourceNode = useInternalNode<WorldGraphFlowNode>(source);
+  const targetNode = useInternalNode<WorldGraphFlowNode>(target);
+  if (!sourceNode || !targetNode) return null;
 
-  while (queue.length > 0) {
-    const nodeId = queue.shift()!;
-    visited.add(nodeId);
-    for (const targetId of outgoing.get(nodeId) ?? []) {
-      levels.set(targetId, Math.max(levels.get(targetId) ?? 0, (levels.get(nodeId) ?? 0) + 1));
-      indegree.set(targetId, (indegree.get(targetId) ?? 0) - 1);
-      if ((indegree.get(targetId) ?? 0) <= 0) {
-        queue.push(targetId);
-      }
-    }
-  }
-
-  const unresolvedLevel = Math.max(0, ...Array.from(levels.values())) + 1;
-  nodes.forEach((node) => {
-    if (!visited.has(node.id) && (incoming.get(node.id)?.length ?? 0) > 0) {
-      levels.set(node.id, unresolvedLevel);
-    }
+  const sourcePoint = getBorderPoint(sourceNode, targetNode);
+  const targetPoint = getBorderPoint(targetNode, sourceNode);
+  const [edgePath, labelX, labelY] = getBezierPath({
+    sourceX: sourcePoint.x,
+    sourceY: sourcePoint.y,
+    sourcePosition: getBorderSide(sourceNode, sourcePoint),
+    targetX: targetPoint.x,
+    targetY: targetPoint.y,
+    targetPosition: getBorderSide(targetNode, targetPoint),
   });
 
-  const groups = new Map<number, WorldNode[]>();
-  nodes.forEach((node) => {
-    const level = levels.get(node.id) ?? 0;
-    groups.set(level, [...(groups.get(level) ?? []), node]);
-  });
+  return (
+    <BaseEdge
+      id={id}
+      path={edgePath}
+      markerEnd={markerEnd}
+      style={style}
+      interactionWidth={interactionWidth ?? 20}
+      label={label}
+      labelX={labelX}
+      labelY={labelY}
+      labelStyle={labelStyle}
+      labelShowBg={labelShowBg}
+      labelBgStyle={labelBgStyle}
+      labelBgPadding={labelBgPadding}
+      labelBgBorderRadius={labelBgBorderRadius}
+    />
+  );
+}
 
+const worldGraphEdgeTypes = { floating: FloatingWorldEdge };
+
+// --- Force-directed layout ------------------------------------------------
+// A topological/layered layout collapses on a cyclic graph (almost no node has
+// in-degree 0), so everything stacks into one unreadable column. A force
+// simulation spreads the actor-entity graph out in 2D instead and lets clusters
+// emerge naturally.
+
+interface ForceSimNode extends SimulationNodeDatum {
+  id: string;
+}
+
+// Small deterministic PRNG so the simulation seeds the same way every render and
+// the layout doesn't jitter between admin-panel polls.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildForceGraphPositions(nodes: WorldNode[], edges: WorldEdge[]): Map<string, { x: number; y: number }> {
   const positions = new Map<string, { x: number; y: number }>();
-  Array.from(groups.entries())
-    .sort(([a], [b]) => a - b)
-    .forEach(([level, group]) => {
-      group
-        .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
-        .forEach((node, index) => {
-          positions.set(node.id, {
-            x: level * 340,
-            y: index * 158,
-          });
-        });
-    });
+  if (nodes.length === 0) return positions;
 
+  // Seed nodes deterministically on a ring (sorted by id) so the simulation
+  // converges to the same arrangement for a given topology.
+  const ordered = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
+  const count = ordered.length;
+  const ring = Math.max(420, count * 40);
+  const simNodes: ForceSimNode[] = ordered.map((node, index) => {
+    const angle = (index / count) * Math.PI * 2;
+    return { id: node.id, x: Math.cos(angle) * ring, y: Math.sin(angle) * ring };
+  });
+
+  const present = new Set(simNodes.map((node) => node.id));
+  const simLinks: SimulationLinkDatum<ForceSimNode>[] = edges
+    .filter((edge) => present.has(edge.sourceNodeId) && present.has(edge.targetNodeId))
+    .map((edge) => ({ source: edge.sourceNodeId, target: edge.targetNodeId }));
+
+  const simulation = forceSimulation<ForceSimNode>(simNodes)
+    .randomSource(mulberry32(0x9e3779b9))
+    .force(
+      'link',
+      forceLink<ForceSimNode, SimulationLinkDatum<ForceSimNode>>(simLinks)
+        .id((node) => node.id)
+        .distance(280)
+        .strength(0.25)
+    )
+    .force('charge', forceManyBody<ForceSimNode>().strength(-2400).distanceMax(2000))
+    .force('collide', forceCollide<ForceSimNode>(165))
+    .force('x', forceX<ForceSimNode>(0).strength(0.05))
+    .force('y', forceY<ForceSimNode>(0).strength(0.07))
+    .stop();
+
+  // Run to convergence synchronously — no animation, just final positions.
+  const iterations = Math.min(600, Math.max(260, count * 12));
+  for (let i = 0; i < iterations; i += 1) simulation.tick();
+
+  simNodes.forEach((node) => {
+    positions.set(node.id, { x: node.x ?? 0, y: node.y ?? 0 });
+  });
   return positions;
 }
 
@@ -575,6 +725,7 @@ function GraphFlowViewport({
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={worldGraphNodeTypes}
+        edgeTypes={worldGraphEdgeTypes}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
@@ -593,17 +744,6 @@ function GraphFlowViewport({
       >
         <Background color="#e5e7eb" gap={20} />
         <Controls position="bottom-left" />
-        <MiniMap
-          pannable
-          zoomable
-          nodeColor={(node) => {
-            const depth = (node.data as GraphNodeData).highlightDepth;
-            if (depth === 1) return '#6366f1';
-            if (depth === 2) return '#38bdf8';
-            if (depth === 3) return '#6ee7b7';
-            return '#cbd5e1';
-          }}
-        />
       </ReactFlow>
 
       <button
@@ -648,7 +788,21 @@ function GraphCanvas({
     }
   }, [nodes, selectedEdgeId, selectedNodeId, visibleEdges]);
 
-  const positions = useMemo(() => buildLayeredGraphPositions(nodes, visibleEdges), [nodes, visibleEdges]);
+  const graphSignature = useMemo(
+    () => [
+      nodes.map((node) => node.id).sort().join('|'),
+      visibleEdges
+        .map((edge) => `${edge.id}:${edge.sourceNodeId}:${edge.targetNodeId}`)
+        .sort()
+        .join('|'),
+    ].join('::'),
+    [nodes, visibleEdges]
+  );
+  // Re-run the force simulation only when the topology changes. The admin panel
+  // polls every few seconds and hands us fresh-but-identical arrays; recomputing
+  // the layout each time would waste work and risk the graph jumping around.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const positions = useMemo(() => buildForceGraphPositions(nodes, visibleEdges), [graphSignature]);
   const selectedNode = selectedNodeId ? nodes.find((node) => node.id === selectedNodeId) : undefined;
   const selectedEdge = selectedEdgeId ? visibleEdges.find((edge) => edge.id === selectedEdgeId) : undefined;
 
@@ -690,7 +844,7 @@ function GraphCanvas({
         id: edge.id,
         source: edge.sourceNodeId,
         target: edge.targetNodeId,
-        type: 'smoothstep',
+        type: 'floating',
         data: { edge },
         label: edge.relationType,
         markerEnd: { type: MarkerType.ArrowClosed, color },
@@ -717,16 +871,6 @@ function GraphCanvas({
     [highlights, selectedEdgeId, selectedNodeId, visibleEdges]
   );
 
-  const graphSignature = useMemo(
-    () => [
-      nodes.map((node) => node.id).sort().join('|'),
-      visibleEdges
-        .map((edge) => `${edge.id}:${edge.sourceNodeId}:${edge.targetNodeId}`)
-        .sort()
-        .join('|'),
-    ].join('::'),
-    [nodes, visibleEdges]
-  );
   const handleRenderFault = useCallback(() => {
     setGraphRecoveryKey((key) => key + 1);
   }, []);
@@ -1112,6 +1256,7 @@ export function AdminPage() {
   const [sessions, setSessions] = useState<AdminSessionSummary[]>([]);
   const [selectedJoinCode, setSelectedJoinCode] = useState('');
   const [worldState, setWorldState] = useState<WorldStateResponse | null>(null);
+  const [helperMessages, setHelperMessages] = useState<WorldHelperMessage[]>([]);
   const [configDraft, setConfigDraft] = useState<ConfigDraft | null>(null);
   const [draftDirty, setDraftDirty] = useState(false);
   const [showRunningTasks, setShowRunningTasks] = useState(false);
@@ -1142,8 +1287,12 @@ export function AdminPage() {
 
   const loadWorldState = useCallback(async () => {
     if (!password || !selectedJoinCode) return;
-    const data = await adminFetch(`/api/admin/sessions/${selectedJoinCode}/world-state`);
+    const [data, helperData] = await Promise.all([
+      adminFetch(`/api/admin/sessions/${selectedJoinCode}/world-state`),
+      adminFetch(`/api/admin/sessions/${selectedJoinCode}/world-helper/messages`),
+    ]);
     setWorldState(data);
+    setHelperMessages(helperData.messages ?? []);
     setError('');
   }, [adminFetch, password, selectedJoinCode]);
 
@@ -1210,6 +1359,23 @@ export function AdminPage() {
     setDraftDirty(true);
   };
 
+  const patchModuleDraft = (moduleName: ModuleLlmName, patch: Partial<LlmDraft>) => {
+    setConfigDraft((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        moduleLlmConfig: {
+          ...prev.moduleLlmConfig,
+          [moduleName]: {
+            ...prev.moduleLlmConfig[moduleName],
+            ...patch,
+          },
+        },
+      };
+    });
+    setDraftDirty(true);
+  };
+
   const saveConfig = async () => {
     if (!configDraft || !selectedJoinCode) return;
     setBusy(true);
@@ -1235,6 +1401,16 @@ export function AdminPage() {
             provider: configDraft.provider,
             model: configDraft.model,
             baseUrl: configDraft.baseUrl,
+          },
+          moduleLlmConfig: Object.fromEntries(
+            MODULE_LLM_LABELS.map(({ key }) => [
+              key,
+              configDraft.moduleLlmConfig[key],
+            ])
+          ),
+          summaryConfig: {
+            roundSummaries: configDraft.roundSummaries,
+            finalNarrative: configDraft.finalNarrative,
           },
           aiPlayers: Object.entries(configDraft.aiPlayers).map(([id, draft]) => ({
             id,
@@ -1672,34 +1848,100 @@ export function AdminPage() {
                         </label>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
-                        <DropdownSelect
-                          value={configDraft.provider}
-                          options={PROVIDER_OPTIONS}
-                          onChange={(value) => {
-                            const provider = value as AiProvider;
-                            patchDraft({
-                              provider,
-                              model: defaultModelForProvider(provider),
-                              baseUrl: baseUrlForProvider(provider),
-                            });
-                          }}
-                          ariaLabel="Admin LLM provider"
-                          size="sm"
-                        />
-                        <DropdownSelect
-                          value={configDraft.model}
-                          options={modelOptionsForValue(configDraft.provider, configDraft.model)}
-                          onChange={(value) => patchDraft({ model: value })}
-                          ariaLabel="Admin LLM model"
-                          size="sm"
+                      <div className="space-y-2 rounded-lg border border-gray-100 p-3">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Summary Generation</h3>
+                        <label className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                          Round summaries
+                          <input
+                            type="checkbox"
+                            checked={configDraft.roundSummaries}
+                            onChange={(event) => patchDraft({ roundSummaries: event.target.checked })}
+                            className="h-4 w-4"
+                          />
+                        </label>
+                        <label className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-700">
+                          Final narrative
+                          <input
+                            type="checkbox"
+                            checked={configDraft.finalNarrative}
+                            onChange={(event) => patchDraft({ finalNarrative: event.target.checked })}
+                            className="h-4 w-4"
+                          />
+                        </label>
+                      </div>
+
+                      <div className="space-y-2 rounded-lg border border-gray-100 p-3">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Shared Game LLM</h3>
+                        <div className="grid grid-cols-2 gap-2">
+                          <DropdownSelect
+                            value={configDraft.provider}
+                            options={PROVIDER_OPTIONS}
+                            onChange={(value) => {
+                              const provider = value as AiProvider;
+                              patchDraft({
+                                provider,
+                                model: defaultModelForProvider(provider),
+                                baseUrl: baseUrlForProvider(provider),
+                              });
+                            }}
+                            ariaLabel="Admin LLM provider"
+                            size="sm"
+                          />
+                          <DropdownSelect
+                            value={configDraft.model}
+                            options={modelOptionsForValue(configDraft.provider, configDraft.model)}
+                            onChange={(value) => patchDraft({ model: value })}
+                            ariaLabel="Admin LLM model"
+                            size="sm"
+                          />
+                        </div>
+                        <input
+                          value={configDraft.baseUrl}
+                          onChange={(event) => patchDraft({ baseUrl: event.target.value })}
+                          className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
                         />
                       </div>
-                      <input
-                        value={configDraft.baseUrl}
-                        onChange={(event) => patchDraft({ baseUrl: event.target.value })}
-                        className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
-                      />
+
+                      <div className="space-y-2 rounded-lg border border-gray-100 p-3">
+                        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Module LLM Overrides</h3>
+                        {MODULE_LLM_LABELS.map(({ key, label }) => {
+                          const draft = configDraft.moduleLlmConfig[key];
+                          return (
+                            <div key={key} className="space-y-2 rounded-lg bg-gray-50 p-2">
+                              <div className="text-xs font-medium text-gray-500">{label}</div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <DropdownSelect
+                                  value={draft.provider}
+                                  options={PROVIDER_OPTIONS}
+                                  onChange={(value) => {
+                                    const provider = value as AiProvider;
+                                    patchModuleDraft(key, {
+                                      provider,
+                                      model: defaultModelForProvider(provider),
+                                      baseUrl: baseUrlForProvider(provider),
+                                    });
+                                  }}
+                                  ariaLabel={`${label} provider`}
+                                  size="sm"
+                                />
+                                <DropdownSelect
+                                  value={draft.model}
+                                  options={modelOptionsForValue(draft.provider, draft.model)}
+                                  onChange={(value) => patchModuleDraft(key, { model: value })}
+                                  ariaLabel={`${label} model`}
+                                  size="sm"
+                                />
+                              </div>
+                              <input
+                                value={draft.baseUrl}
+                                onChange={(event) => patchModuleDraft(key, { baseUrl: event.target.value })}
+                                className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                                aria-label={`${label} base URL`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
 
                       <div className="space-y-2 border-t border-gray-100 pt-3">
                         <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">AI Agents</h3>
@@ -1764,6 +2006,50 @@ export function AdminPage() {
                       </Button>
                     </Card>
                   )}
+
+                {worldState && (
+                  <Card padding="md" className="max-h-[420px] min-w-0 space-y-3 overflow-y-auto" data-testid="admin-helper-history">
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-xs font-semibold uppercase tracking-wider text-gray-400">World Helper History</h2>
+                      <Badge variant="blue">{helperMessages.length}</Badge>
+                    </div>
+                    {helperMessages.length === 0 ? (
+                      <div className="rounded-lg bg-gray-50 p-3 text-sm text-gray-400">
+                        No helper questions have been asked in this session.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {helperMessages.map((message) => (
+                          <div key={message.id} className="rounded-lg border border-gray-100 bg-gray-50/60 p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="truncate text-sm font-semibold text-gray-900">
+                                  {message.playerNickname ?? message.playerId}
+                                </div>
+                                <div className="text-xs text-gray-400">
+                                  {new Date(message.createdAt).toLocaleString()} / {message.model ?? 'model pending'}
+                                </div>
+                              </div>
+                              <Badge variant={message.status === 'completed' ? 'green' : message.status === 'error' ? 'red' : 'yellow'}>
+                                {message.status}
+                              </Badge>
+                            </div>
+                            <p className="mt-2 text-sm font-medium text-gray-700">{message.question}</p>
+                            <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-gray-600">
+                              {message.answer?.answerText || message.streamedText || message.error || 'No answer text'}
+                            </p>
+                            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-400">
+                              <span>{message.citedHeadlineIds.length} headlines</span>
+                              <span>{message.citedNodeIds.length} entities</span>
+                              <span>{message.citedEdgeIds.length} edges</span>
+                              {message.answer?.confidence && <span>{message.answer.confidence} confidence</span>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
+                )}
 
                 <div className="grid gap-4 xl:grid-cols-2">
                   <Card padding="md" className="space-y-3">

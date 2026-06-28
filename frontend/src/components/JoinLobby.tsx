@@ -1,6 +1,6 @@
 import { GameLayout } from './GameLayout';
 import { Card } from './ui';
-import { Headline, RoundSummary as RoundSummaryType, FinalSummary } from '../hooks/useSocket';
+import { Headline, RoundSummary as RoundSummaryType, FinalSummary, WorldHelperMessage } from '../hooks/useSocket';
 import { useGameTimeProgress } from '../hooks/useGameTimeProgress';
 
 interface JoinLobbyProps {
@@ -22,8 +22,11 @@ interface JoinLobbyProps {
   headlines: Headline[];
   roundSummary: RoundSummaryType | null;
   finalSummary: FinalSummary | null;
+  worldHelperMessages: WorldHelperMessage[];
   onBack: () => void;
   onSubmitHeadline: (headline: string) => Promise<{ success: boolean; error?: string; cooldownMs?: number }>;
+  onAskWorldHelper: (question: string) => Promise<{ success: boolean; error?: string }>;
+  onLoadWorldHelperHistory: () => Promise<boolean>;
 }
 
 export function JoinLobby({
@@ -45,8 +48,11 @@ export function JoinLobby({
   headlines,
   roundSummary,
   finalSummary,
+  worldHelperMessages,
   onBack,
   onSubmitHeadline,
+  onAskWorldHelper,
+  onLoadWorldHelperHistory,
 }: JoinLobbyProps) {
   const currentPlayer = players.find((p) => p.id === currentPlayerId);
   const planetPanel = currentPlayer?.planetPanel ?? null;
@@ -112,6 +118,9 @@ export function JoinLobby({
       totalGameMins={totalGameMins}
       currentGameMins={currentGameMins}
       onSubmitHeadline={onSubmitHeadline}
+      worldHelperMessages={worldHelperMessages}
+      onAskWorldHelper={onAskWorldHelper}
+      onLoadWorldHelperHistory={onLoadWorldHelperHistory}
       onBack={onBack}
       lobbyContent={lobbyContent}
     />

@@ -13,6 +13,8 @@ interface GameEndProps {
   totalGameMins: number;
   currentGameMins: number;
   finalSummary: FinalSummary | null;
+  focusHeadlineId?: string | null;
+  focusSignal?: number;
   onBack: () => void;
   backLabel?: string;
 }
@@ -26,6 +28,8 @@ export function GameEnd({
   totalGameMins,
   currentGameMins,
   finalSummary,
+  focusHeadlineId = null,
+  focusSignal = 0,
   onBack,
   backLabel = 'Leave game',
 }: GameEndProps) {
@@ -227,6 +231,8 @@ export function GameEnd({
             <HeadlineFeed
               headlines={realHeadlines}
               currentPlayerId={currentPlayerId}
+              focusHeadlineId={focusHeadlineId}
+              focusSignal={focusSignal}
             />
           </div>
 

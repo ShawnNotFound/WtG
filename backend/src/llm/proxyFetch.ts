@@ -7,6 +7,12 @@ let cachedProxyUrl: string | null | undefined;
 let cachedFetch: typeof fetch | null = null;
 let cachedFetchProxyUrl: string | null = null;
 
+export function resetLlmProxyCacheForTests(): void {
+  cachedProxyUrl = undefined;
+  cachedFetch = null;
+  cachedFetchProxyUrl = null;
+}
+
 function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
   return values.find((value) => value && value.trim().length > 0);
 }
@@ -20,6 +26,20 @@ function normalizeProxyUrl(raw: string | undefined): string | null {
   }
 
   return `http://${value}`;
+}
+
+function envFlag(name: string): string | undefined {
+  return process.env[name]?.trim().toLowerCase();
+}
+
+function proxyExplicitlyDisabled(): boolean {
+  const value = envFlag('LLM_USE_PROXY');
+  return value === 'false' || value === '0' || value === 'no' || value === 'off';
+}
+
+function proxyExplicitlyEnabled(): boolean {
+  const value = envFlag('LLM_USE_PROXY');
+  return value === 'true' || value === '1' || value === 'yes' || value === 'on';
 }
 
 function parseWindowsProxyServer(proxyServer: string | undefined): string | null {
@@ -62,7 +82,7 @@ function queryWindowsRegistryValue(valueName: string): string | undefined {
 
 function windowsProxyUrl(): string | null {
   if (process.platform !== 'win32') return null;
-  if (process.env.LLM_USE_WINDOWS_PROXY === 'false') return null;
+  if (envFlag('LLM_USE_WINDOWS_PROXY') !== 'true') return null;
 
   const enabled = queryWindowsRegistryValue('ProxyEnable');
   if (!enabled || enabled === '0x0') return null;
@@ -75,18 +95,28 @@ export function getLlmProxyUrl(): string | null {
     return cachedProxyUrl;
   }
 
-  cachedProxyUrl = normalizeProxyUrl(
-    firstNonEmpty(
-      process.env.LLM_HTTPS_PROXY,
-      process.env.LLM_HTTP_PROXY,
-      process.env.HTTPS_PROXY,
-      process.env.https_proxy,
-      process.env.HTTP_PROXY,
-      process.env.http_proxy,
-      process.env.ALL_PROXY,
-      process.env.all_proxy
-    )
-  ) ?? windowsProxyUrl();
+  if (proxyExplicitlyDisabled()) {
+    cachedProxyUrl = null;
+    return cachedProxyUrl;
+  }
+
+  const explicitLlmProxy = normalizeProxyUrl(
+    firstNonEmpty(process.env.LLM_HTTPS_PROXY, process.env.LLM_HTTP_PROXY)
+  );
+
+  cachedProxyUrl = explicitLlmProxy;
+  if (!cachedProxyUrl && proxyExplicitlyEnabled()) {
+    cachedProxyUrl = normalizeProxyUrl(
+      firstNonEmpty(
+        process.env.HTTPS_PROXY,
+        process.env.https_proxy,
+        process.env.HTTP_PROXY,
+        process.env.http_proxy,
+        process.env.ALL_PROXY,
+        process.env.all_proxy
+      )
+    ) ?? windowsProxyUrl();
+  }
 
   if (cachedProxyUrl) {
     console.log(`[LLM] Using HTTP proxy for model API calls: ${cachedProxyUrl}`);

@@ -6,6 +6,8 @@ import { PLANET_COLORS, PLANET_TAGS } from '../lib/planets';
 interface HeadlineFeedProps {
   headlines: Headline[];
   currentPlayerId: string;
+  focusHeadlineId?: string | null;
+  focusSignal?: number;
 }
 
 // typography by plausibility band of the displayed variant: mundane/inevitable
@@ -95,8 +97,14 @@ function filterMatchesHeadline(filter: HeadlineFilter, headline: Headline) {
   return haystack.includes(filter.value);
 }
 
-export function HeadlineFeed({ headlines, currentPlayerId }: HeadlineFeedProps) {
+export function HeadlineFeed({
+  headlines,
+  currentPlayerId,
+  focusHeadlineId = null,
+  focusSignal = 0,
+}: HeadlineFeedProps) {
   const feedRef = useRef<HTMLDivElement>(null);
+  const lastFocusSignalRef = useRef(0);
   // sticks to the bottom until the user manually scrolls up
   const followBottomRef = useRef(true);
   // true while a programmatic scroll is in flight, so the scroll handler ignores it
@@ -107,6 +115,7 @@ export function HeadlineFeed({ headlines, currentPlayerId }: HeadlineFeedProps) 
   const [filterDraft, setFilterDraft] = useState('');
   const [filterFocused, setFilterFocused] = useState(false);
   const [activeSuggestion, setActiveSuggestion] = useState(0);
+  const [highlightedHeadlineId, setHighlightedHeadlineId] = useState<string | null>(null);
 
   // snap to bottom on new headlines, only when the user hasn't scrolled away
   useEffect(() => {
@@ -146,6 +155,39 @@ export function HeadlineFeed({ headlines, currentPlayerId }: HeadlineFeedProps) 
       filters.some((filter) => filterMatchesHeadline(filter, headline))
     );
   }, [filters, headlines]);
+
+  useEffect(() => {
+    if (!focusHeadlineId || focusSignal === 0) return;
+    if (lastFocusSignalRef.current === focusSignal) return;
+    lastFocusSignalRef.current = focusSignal;
+    const target = headlines.find((headline) => headline.id === focusHeadlineId);
+    if (!target) return;
+
+    const visible = filters.length === 0 || filters.some((filter) => filterMatchesHeadline(filter, target));
+    if (!visible) {
+      setFilters([]);
+    }
+
+    const scrollToTarget = () => {
+      const feed = feedRef.current;
+      if (!feed) return;
+      const element = feed.querySelector<HTMLElement>(`[data-headline-id="${focusHeadlineId}"]`);
+      if (!element) return;
+      programmaticScrollRef.current = true;
+      followBottomRef.current = false;
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setShowJumpButton(true);
+      setHighlightedHeadlineId(focusHeadlineId);
+      window.setTimeout(() => {
+        programmaticScrollRef.current = false;
+      }, 500);
+      window.setTimeout(() => {
+        setHighlightedHeadlineId((current) => current === focusHeadlineId ? null : current);
+      }, 2200);
+    };
+
+    window.setTimeout(scrollToTarget, visible ? 0 : 60);
+  }, [focusHeadlineId, focusSignal, filters, headlines]);
 
   const filterSuggestions = useMemo(() => {
     const query = normalizeText(filterDraft);
@@ -408,13 +450,18 @@ export function HeadlineFeed({ headlines, currentPlayerId }: HeadlineFeedProps) 
           return (
             <div
               key={headline.id}
+              data-headline-id={headline.id}
               className={`group relative px-3 py-2.5 rounded-lg border ${planetBorder} ${
                 isArchive
                   ? 'bg-amber-50/40 border-amber-100'
                   : isOwn
                   ? 'bg-indigo-50/60 border-indigo-100'
                   : 'bg-gray-50/60 border-gray-100'
-              }`}
+              } ${
+                highlightedHeadlineId === headline.id
+                  ? 'ring-2 ring-indigo-400 ring-offset-2 ring-offset-white'
+                  : ''
+              } transition-shadow`}
             >
               <div className="flex justify-between items-center mb-1">
                 <span className={`flex items-center gap-1.5 text-xs font-medium ${isArchive ? 'text-amber-600' : isOwn ? 'text-indigo-600' : 'text-gray-500'}`}>

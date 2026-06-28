@@ -32,11 +32,40 @@ export const llmConfigSchema = z.object({
   baseUrl: z.string().min(1).max(200).optional(),
 });
 
+export const moduleLlmConfigSchema = z.object({
+  juror: llmConfigSchema.optional(),
+  world: llmConfigSchema.optional(),
+  summary: llmConfigSchema.optional(),
+  helper: llmConfigSchema.optional(),
+}).partial();
+
+export const summaryConfigSchema = z.object({
+  roundSummaries: z.boolean().optional(),
+  finalNarrative: z.boolean().optional(),
+}).partial();
+
+export const worldStateConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  allowCycles: z.boolean().optional(),
+  maxPropagationDepth: z.number().int().min(0).max(8).optional(),
+  maxNodeReactions: z.number().int().min(1).max(200).optional(),
+  maxEventsPerNode: z.number().int().min(1).max(20).optional(),
+  nodeAgentConcurrency: z.number().int().min(1).max(16).optional(),
+  storeUnaffectedDecisions: z.boolean().optional(),
+}).partial();
+
 // request body schemas
 export const createSessionSchema = z.object({
   hostNickname: nicknameSchema,
   aiPlayers: z.array(aiPlayerConfigSchema).max(8).optional(),
   llmConfig: llmConfigSchema.optional(),
+  moduleLlmConfig: moduleLlmConfigSchema.optional(),
+  summaryConfig: summaryConfigSchema.optional(),
+  worldStateConfig: worldStateConfigSchema.optional(),
+  playMinutes: z.number().min(0.1).max(120).optional(),
+  breakMinutes: z.number().min(0).max(60).optional(),
+  maxRounds: z.number().int().min(1).max(20).optional(),
+  timelineSpeedRatio: z.number().min(0).max(100000).optional(),
 });
 
 export const joinSessionSchema = z.object({
@@ -55,9 +84,21 @@ export const submitHeadlineSchema = z.object({
   headline: headlineSchema,
 });
 
+export const worldHelperAskSchema = z.object({
+  joinCode: joinCodeSchema,
+  question: z
+    .string()
+    .min(1, 'Question cannot be empty')
+    .max(1000, 'Question must be at most 1000 characters')
+    .transform((val) => val.trim()),
+  clientRequestId: z.string().max(120).optional(),
+});
+
 export type CreateSessionBody = z.infer<typeof createSessionSchema>;
 export type JoinSessionBody = z.infer<typeof joinSessionSchema>;
 export type SubmitHeadlineBody = z.infer<typeof submitHeadlineSchema>;
 export type AiPlayerConfigBody = z.infer<typeof aiPlayerConfigSchema>;
 export type LlmConfigBody = z.infer<typeof llmConfigSchema>;
+export type ModuleLlmConfigBody = z.infer<typeof moduleLlmConfigSchema>;
+export type WorldHelperAskBody = z.infer<typeof worldHelperAskSchema>;
 

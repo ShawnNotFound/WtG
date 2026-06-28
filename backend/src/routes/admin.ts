@@ -5,13 +5,18 @@ import { normalizeAiPlayerConfig } from '../ai/aiPlayerService.js';
 import { gameLoopManager } from '../game/gameLoop.js';
 import { getPlayerScoreBreakdowns } from '../game/scoringService.js';
 import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
+import { normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
 import {
   aiPlayerConfigSchema,
   joinCodeSchema,
   llmConfigSchema,
+  moduleLlmConfigSchema,
   nicknameSchema,
+  summaryConfigSchema,
+  worldStateConfigSchema,
 } from '../utils/validation.js';
 import { getWorldStateForJoinCode, worldStateProcessor } from '../world/worldStateService.js';
+import { getWorldHelperAdminHistory } from '../world/worldHelperService.js';
 import evaluationsRouter from './evaluations.js';
 
 const router = Router();
@@ -23,17 +28,10 @@ const adminConfigSchema = z.object({
   maxRounds: z.number().int().min(1).max(20).optional(),
   timelineSpeedRatio: z.number().min(0).max(100000).optional(),
   worldStateEnabled: z.boolean().optional(),
-  worldStateConfig: z
-    .object({
-      allowCycles: z.boolean().optional(),
-      maxPropagationDepth: z.number().int().min(0).max(8).optional(),
-      maxNodeReactions: z.number().int().min(1).max(200).optional(),
-      maxEventsPerNode: z.number().int().min(1).max(20).optional(),
-      nodeAgentConcurrency: z.number().int().min(1).max(16).optional(),
-      storeUnaffectedDecisions: z.boolean().optional(),
-    })
-    .optional(),
+  worldStateConfig: worldStateConfigSchema.optional(),
+  summaryConfig: summaryConfigSchema.optional(),
   llmConfig: llmConfigSchema.optional(),
+  moduleLlmConfig: moduleLlmConfigSchema.optional(),
   aiPlayers: z
     .array(
       z.object({
@@ -176,6 +174,31 @@ router.get('/sessions/:joinCode/world-state', async (req: Request, res: Response
     if (validationError(res, error)) return;
     console.error('Admin world-state fetch failed:', error);
     res.status(500).json({ error: 'Failed to fetch world state' });
+  }
+});
+
+router.get('/sessions/:joinCode/world-helper/messages', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const joinCode = joinCodeSchema.parse(req.params.joinCode.toUpperCase());
+    const playerId = typeof req.query.playerId === 'string' && req.query.playerId
+      ? z.string().uuid().parse(req.query.playerId)
+      : undefined;
+
+    const sessionResult = await pool.query(
+      `SELECT id FROM game_sessions WHERE join_code = $1`,
+      [joinCode]
+    );
+    if (sessionResult.rows.length === 0) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+
+    const messages = await getWorldHelperAdminHistory(sessionResult.rows[0].id, playerId);
+    res.json({ messages });
+  } catch (error) {
+    if (validationError(res, error)) return;
+    console.error('Admin world helper history fetch failed:', error);
+    res.status(500).json({ error: 'Failed to fetch world helper history' });
   }
 });
 
@@ -346,7 +369,7 @@ router.patch('/sessions/:joinCode/config', async (req: Request, res: Response): 
     const parsed = adminConfigSchema.parse(req.body);
 
     const sessionResult = await pool.query(
-      `SELECT id, world_state_config
+      `SELECT id, world_state_config, summary_config
        FROM game_sessions
        WHERE join_code = $1`,
       [joinCode]
@@ -372,6 +395,19 @@ router.patch('/sessions/:joinCode/config', async (req: Request, res: Response): 
     if (parsed.timelineSpeedRatio !== undefined) addUpdate('timeline_speed_ratio', parsed.timelineSpeedRatio);
     if (parsed.llmConfig !== undefined) {
       addUpdate('llm_config', JSON.stringify(normalizeJsonModelSelection(parsed.llmConfig)));
+    }
+    if (parsed.moduleLlmConfig !== undefined) {
+      addUpdate('module_llm_config', JSON.stringify(normalizeModuleLlmConfig(parsed.moduleLlmConfig)));
+    }
+    if (parsed.summaryConfig !== undefined) {
+      const existingSummaryConfig =
+        session.summary_config && typeof session.summary_config === 'object'
+          ? session.summary_config
+          : {};
+      addUpdate('summary_config', JSON.stringify({
+        ...existingSummaryConfig,
+        ...parsed.summaryConfig,
+      }));
     }
     if (parsed.worldStateEnabled !== undefined || parsed.worldStateConfig !== undefined) {
       const existingWorldConfig =
