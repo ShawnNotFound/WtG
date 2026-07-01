@@ -142,5 +142,6 @@ Your role is to create immersive narrative summaries that:
 
 Write as if you're a journalist or documentarian looking back at this period in history.
 Keep the narrative to 2 short paragraphs — concise and tight, not exhaustive.
-Always output valid JSON matching the required schema.`;
+Always output valid JSON matching the required schema.
+If the narrative needs a paragraph break, encode it inside the JSON string as \\n\\n instead of using a raw line break.`;
 }

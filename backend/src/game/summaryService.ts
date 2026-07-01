@@ -6,6 +6,8 @@
 import pool from '../db/pool.js';
 import {
   OpenAIError,
+  ResponsesApiRequest,
+  ResponsesApiResult,
 } from '../llm/openaiResponsesClient.js';
 import {
   createJsonModelClient,
@@ -83,6 +85,30 @@ export function resetSummaryClient(): void {
  */
 export function setSummaryClient(client: JsonModelClient): void {
   clientInstance = client;
+}
+
+async function callSummaryJson<T>(
+  client: JsonModelClient,
+  request: ResponsesApiRequest
+): Promise<ResponsesApiResult<T>> {
+  try {
+    return await client.callResponsesApi<T>(request);
+  } catch (error) {
+    if (!(error instanceof OpenAIError) || error.code !== 'INVALID_JSON_OUTPUT' || !request.jsonSchema) {
+      throw error;
+    }
+
+    return client.callResponsesApi<T>({
+      ...request,
+      instructions: `${request.instructions ?? ''}
+
+CRITICAL JSON RECOVERY: Your previous response was not valid JSON. Return one complete JSON object only. Escape all paragraph breaks inside string values as \\n\\n. Do not use markdown, comments, trailing commas, ellipses, or text outside the JSON object.`,
+      input: `${request.input}
+
+The previous model response for this task failed JSON parsing. Regenerate the same requested summary as a complete, valid JSON object matching the schema.`,
+      temperature: 0,
+    });
+  }
 }
 
 /**
@@ -216,7 +242,7 @@ export async function generateRoundSummary(
     const instructions = buildSummaryInstructions();
 
     const client = await getClient(sessionId);
-    const result = await client.callResponsesApi<RoundSummaryOutput>({
+    const result = await callSummaryJson<RoundSummaryOutput>(client, {
       input: prompt,
       instructions,
       jsonSchema: summaryJsonSchema,
@@ -293,7 +319,7 @@ export async function generateFinalNarrativeSummary(
     const instructions = buildNarrativeInstructions();
 
     const client = await getClient(sessionId);
-    const result = await client.callResponsesApi<NarrativeSummaryOutput>({
+    const result = await callSummaryJson<NarrativeSummaryOutput>(client, {
       input: prompt,
       instructions,
       jsonSchema: narrativeJsonSchema,

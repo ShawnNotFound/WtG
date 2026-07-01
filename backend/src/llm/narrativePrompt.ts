@@ -66,7 +66,8 @@ Each report should be 375-750 words. Together they should illuminate different f
 
 The characters should feel real. Show them noticing specific events, reacting to them, being changed by them. The headlines are their lived reality. Do not simply list events — make them part of lives being lived.
 
-Always output valid JSON matching the required schema.`;
+Always output valid JSON matching the required schema.
+If a report needs paragraph breaks, encode them inside JSON strings as \\n\\n instead of using raw line breaks.`;
 }
 
 export function buildNarrativePrompt(input: NarrativePromptInput): string {

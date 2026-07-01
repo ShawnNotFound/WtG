@@ -7,6 +7,7 @@ import {
   ResponsesApiResult,
 } from './openaiResponsesClient.js';
 import { getDefaultFetch } from './proxyFetch.js';
+import { parseModelJson } from './modelJsonParser.js';
 
 export { DEFAULT_OPENAI_MODEL };
 
@@ -33,12 +34,6 @@ export interface JsonModelClient {
 export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
-function stripJsonCodeFence(text: string): string {
-  const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced ? fenced[1].trim() : trimmed;
-}
-
 function buildDeepSeekUserInput(input: string, jsonSchema?: JsonSchemaDefinition): string {
   if (!jsonSchema) {
     return input;
@@ -46,7 +41,9 @@ function buildDeepSeekUserInput(input: string, jsonSchema?: JsonSchemaDefinition
 
   return `${input}
 
-Return ONLY a JSON object matching this JSON schema. Do not wrap the JSON in markdown.
+Return ONLY a complete JSON object matching this JSON schema. Do not wrap the JSON in markdown.
+Escape paragraph breaks inside string values as \\n. Do not use literal line breaks inside JSON strings.
+Do not truncate values, add ellipses, or add commentary outside the JSON object.
 
 === JSON SCHEMA (${jsonSchema.name}) ===
 ${JSON.stringify(jsonSchema.schema)}`;
@@ -117,12 +114,14 @@ function createDeepSeekJsonClient(config: JsonModelClientConfig): JsonModelClien
       }
 
       let parsedOutput: T;
-      const jsonText = stripJsonCodeFence(rawText);
+      let jsonText: string;
       try {
-        parsedOutput = JSON.parse(jsonText) as T;
+        const parsed = parseModelJson<T>(rawText);
+        parsedOutput = parsed.output;
+        jsonText = parsed.jsonText;
       } catch {
         throw new OpenAIError(
-          `Failed to parse model output as JSON: ${jsonText.substring(0, 200)}...`,
+          `Failed to parse model output as JSON: ${rawText.substring(0, 200)}...`,
           'INVALID_JSON_OUTPUT'
         );
       }

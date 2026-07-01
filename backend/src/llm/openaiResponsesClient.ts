@@ -4,6 +4,7 @@
  */
 
 import { getDefaultFetch } from './proxyFetch.js';
+import { parseModelJson } from './modelJsonParser.js';
 
 /**
  * configuration for the openai client.
@@ -198,8 +199,11 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
 
     // parse the text as json
     let parsedOutput: T;
+    let jsonText = rawText;
     try {
-      parsedOutput = JSON.parse(rawText);
+      const parsed = parseModelJson<T>(rawText);
+      parsedOutput = parsed.output;
+      jsonText = parsed.jsonText;
     } catch (err) {
       throw new OpenAIError(
         `Failed to parse model output as JSON: ${rawText.substring(0, 200)}...`,
@@ -218,7 +222,7 @@ export function createOpenAIClient(config: OpenAIClientConfig) {
 
     return {
       output: parsedOutput,
-      rawText,
+      rawText: jsonText,
       model: responseData.model ?? model,
       usage,
     };
