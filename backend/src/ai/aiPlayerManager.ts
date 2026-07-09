@@ -6,10 +6,13 @@ import { computePlanetPanel, migrateGlobalUsage, migratePlayerOrdinals } from '.
 import { submitPlayerHeadline } from '../game/headlineSubmissionService.js';
 import { canSubmitHeadline, recordHeadlineSubmission } from '../game/headlineCooldown.js';
 import {
+  buildAiWorldHelperQuestion,
   generateAiStoryDirection,
   getAiPlayerRows,
   normalizeAiPlayerConfig,
 } from './aiPlayerService.js';
+import { askWorldHelper, WorldHelperMessage } from '../world/worldHelperService.js';
+import { AiWorldHelperInsight } from '../prompts/aiPlayerPrompt.js';
 
 interface SessionRuntime {
   io: Server;
@@ -302,6 +305,14 @@ class AiPlayerManager {
         input.id,
         input.snapshot.planetUsageGlobal
       );
+      const worldHelperInsights = await this.maybeAskWorldHelper(runtime, {
+        id: input.id,
+        nickname: input.nickname,
+        config: input.config,
+        snapshot: input.snapshot,
+        planetPanel,
+        visibleHeadlines: input.visibleHeadlines,
+      });
 
       const generated = await generateAiStoryDirection({
         nickname: input.nickname,
@@ -311,6 +322,7 @@ class AiPlayerManager {
         maxRounds: input.snapshot.maxRounds,
         planetPanel,
         headlines: input.visibleHeadlines,
+        worldHelperInsights,
       });
 
       await submitPlayerHeadline({
@@ -332,6 +344,70 @@ class AiPlayerManager {
       console.error(`[AI ${runtime.joinCode}] ${input.nickname} submission failed:`, error);
     }
   }
+
+  private async maybeAskWorldHelper(
+    runtime: SessionRuntime,
+    input: {
+      id: string;
+      nickname: string;
+      config: ReturnType<typeof normalizeAiPlayerConfig>;
+      snapshot: SessionSnapshot;
+      planetPanel: PlanetPanelEntry[];
+      visibleHeadlines: Awaited<ReturnType<typeof getRecentVisibleHeadlines>>;
+    }
+  ): Promise<AiWorldHelperInsight[]> {
+    const activity = input.config.helperActivity;
+    if (activity <= 0 || Math.random() >= activity) {
+      return [];
+    }
+
+    const question = buildAiWorldHelperQuestion({
+      nickname: input.nickname,
+      config: input.config,
+      inGameNow: input.snapshot.inGameNow,
+      currentRound: input.snapshot.currentRound,
+      maxRounds: input.snapshot.maxRounds,
+      planetPanel: input.planetPanel,
+      headlines: input.visibleHeadlines,
+    });
+
+    try {
+      const message = await askWorldHelper({
+        sessionId: runtime.sessionId,
+        joinCode: runtime.joinCode,
+        playerId: input.id,
+        question,
+        clientRequestId: `ai-helper-${input.id}-${Date.now()}`,
+      });
+      const insight = helperMessageToInsight(message);
+      return insight ? [insight] : [];
+    } catch (error) {
+      console.warn(`[AI ${runtime.joinCode}] ${input.nickname} World Helper question failed:`, error);
+      return [];
+    }
+  }
 }
 
 export const aiPlayerManager = new AiPlayerManager();
+
+function helperMessageToInsight(message: WorldHelperMessage): AiWorldHelperInsight | null {
+  const answerText = message.answer?.answerText || message.streamedText;
+  if (!answerText || message.status === 'error') {
+    return null;
+  }
+
+  return {
+    question: message.question,
+    answerText,
+    entityRefs: (message.answer?.entityRefs ?? []).map((ref) => ({
+      name: ref.name,
+      reason: ref.reason,
+    })),
+    edgeRefs: (message.answer?.edgeRefs ?? []).map((ref) => ({
+      sourceName: ref.sourceName,
+      targetName: ref.targetName,
+      relationType: ref.relationType,
+      reason: ref.reason,
+    })),
+  };
+}

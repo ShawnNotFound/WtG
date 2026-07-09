@@ -28,6 +28,7 @@ export const aiPlayerConfigSchema = z.object({
   stylePrompt: z.string().max(500).optional(),
   creativity: z.number().min(0).max(1).optional(),
   submitEverySeconds: z.number().min(0).max(600).optional(),
+  helperActivity: z.number().min(0).max(1).optional(),
   provider: z.enum(['openai', 'deepseek']).optional(),
   model: z.string().min(1).max(80).optional(),
 });
@@ -58,6 +59,12 @@ export const worldStateConfigSchema = z.object({
   maxEventsPerNode: z.number().int().min(1).max(20).optional(),
   nodeAgentConcurrency: z.number().int().min(1).max(16).optional(),
   storeUnaffectedDecisions: z.boolean().optional(),
+  retrievalStrategy: z.enum(['hybrid', 'weighted', 'node_picker']).optional(),
+  maxContextNodes: z.number().int().min(4).max(64).optional(),
+  maxNeighborsPerNode: z.number().int().min(1).max(32).optional(),
+  maxCandidateNeighbors: z.number().int().min(1).max(64).optional(),
+  connectionDisplayThreshold: z.number().min(0).max(1).optional(),
+  propagationRandomMode: z.enum(['seeded', 'random', 'threshold']).optional(),
 }).partial();
 
 // request body schemas

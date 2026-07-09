@@ -3,7 +3,7 @@
  * planets represent thematic categories for headlines, themed around greek/roman gods.
  */
 
-import { PlanetEntry } from '../llm/jurorPrompt.js';
+import { PlanetEntry } from '../prompts/jurorPrompt.js';
 
 /**
  * default planet list for the game.

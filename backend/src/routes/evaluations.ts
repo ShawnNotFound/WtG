@@ -23,6 +23,7 @@ const evaluationConfigSchema = z.object({
       stylePrompt: DEFAULT_AI_PLAYER_CONFIG.stylePrompt,
       creativity: DEFAULT_AI_PLAYER_CONFIG.creativity,
       submitEverySeconds: DEFAULT_AI_PLAYER_CONFIG.submitEverySeconds,
+      helperActivity: DEFAULT_AI_PLAYER_CONFIG.helperActivity,
       provider: DEFAULT_AI_PLAYER_CONFIG.provider,
       model: DEFAULT_AI_PLAYER_CONFIG.model,
     },
@@ -31,6 +32,7 @@ const evaluationConfigSchema = z.object({
       stylePrompt: DEFAULT_AI_PLAYER_CONFIG.stylePrompt,
       creativity: DEFAULT_AI_PLAYER_CONFIG.creativity,
       submitEverySeconds: DEFAULT_AI_PLAYER_CONFIG.submitEverySeconds,
+      helperActivity: DEFAULT_AI_PLAYER_CONFIG.helperActivity,
       provider: DEFAULT_AI_PLAYER_CONFIG.provider,
       model: DEFAULT_AI_PLAYER_CONFIG.model,
     },
@@ -133,4 +135,3 @@ router.put('/:batchId/runs/:runId/judge-result', async (req: Request, res: Respo
 });
 
 export default router;
-

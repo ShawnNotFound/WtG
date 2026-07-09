@@ -3,8 +3,8 @@
  * builds the prompt for ai-generated narrative summaries displayed during break phase.
  */
 
-import { JsonSchemaDefinition } from './openaiResponsesClient.js';
-import { SummaryPromptInput, RoundHeadlineInput } from './summaryTypes.js';
+import { JsonSchemaDefinition } from '../llm/openaiResponsesClient.js';
+import { SummaryPromptInput, RoundHeadlineInput } from '../llm/summaryTypes.js';
 
 /**
  * json schema that enforces the structure of the round summary output.

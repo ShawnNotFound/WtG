@@ -3,7 +3,7 @@
  * this module builds the prompt for headline evaluation and defines the expected output structure.
  */
 
-import { JsonSchemaDefinition } from './openaiResponsesClient.js';
+import { JsonSchemaDefinition } from '../llm/openaiResponsesClient.js';
 
 export interface HeadlineEntry {
   id?: string;

@@ -88,6 +88,7 @@ interface AiDraft {
   stylePrompt: string;
   creativity: string;
   submitEverySeconds: string;
+  helperActivity: string;
   provider: AiProvider;
   model: string;
 }
@@ -110,6 +111,7 @@ function makeAiDraft(index: number): AiDraft {
     stylePrompt: DEFAULT_STYLE,
     creativity: '1',
     submitEverySeconds: '0',
+    helperActivity: '0.5',
     provider,
     model: defaultModelForProvider(provider),
   };
@@ -255,6 +257,7 @@ export function EvaluationPage() {
               stylePrompt: player.stylePrompt,
               creativity: Number(player.creativity),
               submitEverySeconds: Number(player.submitEverySeconds),
+              helperActivity: Number(player.helperActivity),
               provider: player.provider,
               model: player.model,
             })),
@@ -462,7 +465,7 @@ export function EvaluationPage() {
                       />
                       <DropdownSelect value={player.model} options={modelOptionsForValue(player.provider, player.model)} onChange={(value) => patchAi(index, { model: value })} ariaLabel={`AI ${index + 1} model`} />
                     </div>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-3 gap-2">
                       <label className="text-xs text-gray-500">
                         Creativity
                         <input type="number" min={0} max={1} step={0.05} value={player.creativity} onChange={(event) => patchAi(index, { creativity: event.target.value })} className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900" />
@@ -470,6 +473,10 @@ export function EvaluationPage() {
                       <label className="text-xs text-gray-500">
                         Extra delay
                         <input type="number" min={0} max={600} value={player.submitEverySeconds} onChange={(event) => patchAi(index, { submitEverySeconds: event.target.value })} className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900" />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Helper
+                        <input type="number" min={0} max={1} step={0.05} value={player.helperActivity} onChange={(event) => patchAi(index, { helperActivity: event.target.value })} className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900" />
                       </label>
                     </div>
                   </div>

@@ -1,12 +1,19 @@
 import { PoolClient } from 'pg';
 import pool from '../db/pool.js';
-import { createJsonModelClient, getJsonProviderConfig, JsonModelClient } from '../llm/jsonModelClient.js';
-import { getSessionLlmSelection } from '../llm/sessionLlmConfig.js';
+import {
+  createJsonModelClient,
+  getJsonProviderConfig,
+  JsonModelClient,
+  normalizeJsonModelSelection,
+} from '../llm/jsonModelClient.js';
+import { getSessionLlmSelection, normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
+import { mergeWorldNodeSummary, normalizeWorldNodeSummary } from './worldNodeDetail.js';
 import { SEED_HEADLINES } from '../game/seedHeadlines.js';
 import {
   buildEntityReactionPrompt,
   buildHeadlineWorldStateIntakePrompt,
   buildInitialWorldStatePrompt,
+  buildNodePickerPrompt,
   buildWorldStateInstructions,
   EntityReactionOutput,
   entityReactionJsonSchema,
@@ -15,10 +22,13 @@ import {
   HeadlineWorldStateIntakeOutput,
   InitialWorldStateOutput,
   initialWorldStateJsonSchema,
+  NodeCatalogEntry,
+  nodePickerJsonSchema,
+  NodePickerOutput,
   WorldAttribute,
-  WorldEdgeDraft,
+  WorldConnectionDraft,
   WorldNodeDraft,
-} from './worldStatePrompt.js';
+} from '../prompts/worldStatePrompt.js';
 
 type WorldStateJobKind = 'initial' | 'headline' | 'manual';
 type WorldStateJobStatus = 'queued' | 'running' | 'completed' | 'error';
@@ -35,6 +45,12 @@ export interface WorldStatePropagationConfig {
   maxEventsPerNode: number;
   nodeAgentConcurrency: number;
   storeUnaffectedDecisions: boolean;
+  retrievalStrategy: 'hybrid' | 'weighted' | 'node_picker';
+  maxContextNodes: number;
+  maxNeighborsPerNode: number;
+  maxCandidateNeighbors: number;
+  connectionDisplayThreshold: number;
+  propagationRandomMode: 'seeded' | 'random' | 'threshold';
 }
 
 export const DEFAULT_WORLD_STATE_CONFIG: WorldStatePropagationConfig = {
@@ -45,6 +61,12 @@ export const DEFAULT_WORLD_STATE_CONFIG: WorldStatePropagationConfig = {
   maxEventsPerNode: 2,
   nodeAgentConcurrency: 4,
   storeUnaffectedDecisions: true,
+  retrievalStrategy: 'hybrid',
+  maxContextNodes: 16,
+  maxNeighborsPerNode: 8,
+  maxCandidateNeighbors: 12,
+  connectionDisplayThreshold: 0.15,
+  propagationRandomMode: 'seeded',
 };
 
 interface WorldStateJobRow {
@@ -95,12 +117,21 @@ interface GraphSnapshotNode {
   timesUpdated: number;
 }
 
-interface GraphSnapshotEdge {
+interface ContextConnection {
   id: string;
   source: string;
   target: string;
-  relationType: string;
-  summary: string;
+  strength: number;
+  rationale: string;
+}
+
+interface ConnectionCandidate {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  targetName: string;
+  strength: number;
+  rationale: string;
 }
 
 interface AdminGraphSnapshotNode {
@@ -188,19 +219,35 @@ function cleanType(value: unknown): string {
   return cleanText(value, 'entity', 80).toLowerCase();
 }
 
-function cleanRelationType(value: unknown): string {
-  const cleaned = cleanText(value, 'RELATED_TO', 80)
-    .replace(/[^a-zA-Z0-9_ -]/g, '')
-    .replace(/\s+/g, '_')
-    .toUpperCase();
-  return cleaned || 'RELATED_TO';
-}
-
 function cleanEventId(value: unknown, fallback: string): string {
   const cleaned = cleanText(value, fallback, 120)
     .replace(/[^a-zA-Z0-9:_-]/g, '_')
     .replace(/_+/g, '_');
   return cleaned || fallback;
+}
+
+export function seededProbability(seed: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index++) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 0x100000000;
+}
+
+export function shouldPropagateByConnection(
+  strength: number,
+  config: WorldStatePropagationConfig,
+  seed: string
+): boolean {
+  const probability = clampNumber(strength, 0, 1);
+  if (probability <= 0) return false;
+  if (probability >= 1) return true;
+  if (config.propagationRandomMode === 'threshold') return true;
+  const roll = config.propagationRandomMode === 'random'
+    ? Math.random()
+    : seededProbability(seed);
+  return roll < probability;
 }
 
 function attributesToRecord(attributes: WorldAttribute[] | undefined): Record<string, string> {
@@ -227,6 +274,26 @@ function parseNumberConfig(value: unknown, fallback: number, min: number, max: n
   const number = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.round(clampNumber(number, min, max));
+}
+
+function parseFloatConfig(value: unknown, fallback: number, min: number, max: number): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return clampNumber(number, min, max);
+}
+
+function parseRetrievalStrategy(value: unknown): WorldStatePropagationConfig['retrievalStrategy'] {
+  if (value === 'weighted' || value === 'node_picker' || value === 'hybrid') {
+    return value;
+  }
+  return DEFAULT_WORLD_STATE_CONFIG.retrievalStrategy;
+}
+
+function parsePropagationRandomMode(value: unknown): WorldStatePropagationConfig['propagationRandomMode'] {
+  if (value === 'random' || value === 'threshold' || value === 'seeded') {
+    return value;
+  }
+  return DEFAULT_WORLD_STATE_CONFIG.propagationRandomMode;
 }
 
 export function normalizeWorldStateConfig(config: unknown): WorldStatePropagationConfig {
@@ -262,6 +329,32 @@ export function normalizeWorldStateConfig(config: unknown): WorldStatePropagatio
       16
     ),
     storeUnaffectedDecisions: source.storeUnaffectedDecisions !== false,
+    retrievalStrategy: parseRetrievalStrategy(source.retrievalStrategy),
+    maxContextNodes: parseNumberConfig(
+      source.maxContextNodes,
+      DEFAULT_WORLD_STATE_CONFIG.maxContextNodes,
+      4,
+      64
+    ),
+    maxNeighborsPerNode: parseNumberConfig(
+      source.maxNeighborsPerNode,
+      DEFAULT_WORLD_STATE_CONFIG.maxNeighborsPerNode,
+      1,
+      32
+    ),
+    maxCandidateNeighbors: parseNumberConfig(
+      source.maxCandidateNeighbors,
+      DEFAULT_WORLD_STATE_CONFIG.maxCandidateNeighbors,
+      1,
+      64
+    ),
+    connectionDisplayThreshold: parseFloatConfig(
+      source.connectionDisplayThreshold,
+      DEFAULT_WORLD_STATE_CONFIG.connectionDisplayThreshold,
+      0,
+      1
+    ),
+    propagationRandomMode: parsePropagationRandomMode(source.propagationRandomMode),
   };
 }
 
@@ -322,7 +415,10 @@ function affectedNamesFromIntake(output: HeadlineWorldStateIntakeOutput) {
       ...output.directEvents.map((event) => cleanName(event.targetNodeName)),
     ],
     cascade: [],
-    related: output.edges.flatMap((edge) => [cleanName(edge.source), cleanName(edge.target)]),
+    related: output.connectionUpdates.flatMap((connection) => [
+      cleanName(connection.source),
+      cleanName(connection.target),
+    ]),
   };
 }
 
@@ -358,57 +454,144 @@ async function isSessionWorldStateEnabled(sessionId: string): Promise<boolean> {
   return config ? isWorldStateEnabled(config) : false;
 }
 
-async function loadGraphSnapshot(sessionId: string): Promise<{
-  nodes: GraphSnapshotNode[];
-  edges: GraphSnapshotEdge[];
-}> {
-  const nodeResult = await pool.query(
-    `SELECT id, name, type, summary, times_updated
+async function loadNodeCatalog(sessionId: string): Promise<NodeCatalogEntry[]> {
+  const result = await pool.query(
+    `SELECT id, name, type, times_updated
      FROM world_state_nodes
      WHERE session_id = $1
-     ORDER BY times_updated DESC, updated_at DESC
-     LIMIT 60`,
+     ORDER BY name ASC`,
     [sessionId]
   );
 
-  const edgeResult = await pool.query(
-    `SELECT
-       e.id,
-       source.name AS source,
-       target.name AS target,
-       e.relation_type,
-       e.summary
-     FROM world_state_edges e
-     JOIN world_state_nodes source ON source.id = e.source_node_id
-     JOIN world_state_nodes target ON target.id = e.target_node_id
-     WHERE e.session_id = $1
-     ORDER BY e.times_updated DESC, e.updated_at DESC
-     LIMIT 100`,
-    [sessionId]
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    timesUpdated: row.times_updated,
+  }));
+}
+
+function keywordScore(text: string, query: string): number {
+  const tokens = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/i)
+    .filter((token) => token.length >= 3);
+  const haystack = text.toLowerCase();
+  return tokens.reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0);
+}
+
+function pickCatalogNodesByKeywords(
+  catalog: NodeCatalogEntry[],
+  query: string,
+  limit: number
+): string[] {
+  return [...catalog]
+    .map((node) => ({
+      node,
+      score: keywordScore(`${node.name} ${node.type}`, query) + Math.min(node.timesUpdated, 5) * 0.1,
+    }))
+    .sort((a, b) => b.score - a.score || b.node.timesUpdated - a.node.timesUpdated || a.node.name.localeCompare(b.node.name))
+    .filter((entry) => entry.score > 0)
+    .slice(0, limit)
+    .map((entry) => entry.node.id);
+}
+
+async function loadContextSlice(
+  sessionId: string,
+  selectedNodeIds: string[],
+  config: WorldStatePropagationConfig
+): Promise<{ nodes: GraphSnapshotNode[]; connections: ContextConnection[] }> {
+  const maxContextNodes = config.maxContextNodes;
+  const maxConnectionRows = Math.max(maxContextNodes, maxContextNodes * config.maxNeighborsPerNode);
+  let anchorIds = [...new Set(selectedNodeIds)].slice(0, maxContextNodes);
+
+  if (anchorIds.length === 0) {
+    const fallback = await pool.query(
+      `SELECT id
+       FROM world_state_nodes
+       WHERE session_id = $1
+       ORDER BY times_updated DESC, updated_at DESC, name ASC
+       LIMIT $2`,
+      [sessionId, maxContextNodes]
+    );
+    anchorIds = fallback.rows.map((row) => row.id);
+  }
+
+  if (anchorIds.length === 0) {
+    return { nodes: [], connections: [] };
+  }
+
+  const neighborhood = await pool.query(
+    `SELECT source_node_id, target_node_id
+     FROM world_state_connections
+     WHERE session_id = $1
+       AND (source_node_id = ANY($2::uuid[]) OR target_node_id = ANY($2::uuid[]))
+     ORDER BY strength DESC, times_updated DESC, updated_at DESC
+     LIMIT $3`,
+    [sessionId, anchorIds, maxConnectionRows]
   );
+
+  const nodeIds = new Set(anchorIds);
+  for (const row of neighborhood.rows) {
+    if (nodeIds.size >= maxContextNodes) break;
+    nodeIds.add(row.source_node_id);
+    if (nodeIds.size >= maxContextNodes) break;
+    nodeIds.add(row.target_node_id);
+  }
+
+  const finalIds = [...nodeIds].slice(0, maxContextNodes);
+  const [nodesResult, connectionsResult] = await Promise.all([
+    pool.query(
+      `SELECT id, name, type, summary, times_updated
+       FROM world_state_nodes
+       WHERE session_id = $1 AND id = ANY($2::uuid[])
+       ORDER BY times_updated DESC, updated_at DESC, name ASC`,
+      [sessionId, finalIds]
+    ),
+    pool.query(
+      `SELECT
+         c.id,
+         source.name AS source,
+         target.name AS target,
+         c.strength,
+         c.rationale
+       FROM world_state_connections c
+       JOIN world_state_nodes source ON source.id = c.source_node_id
+       JOIN world_state_nodes target ON target.id = c.target_node_id
+       WHERE c.session_id = $1
+         AND c.source_node_id = ANY($2::uuid[])
+         AND c.target_node_id = ANY($2::uuid[])
+         AND (c.strength > 0 OR c.times_updated > 0)
+       ORDER BY c.strength DESC, c.times_updated DESC, c.updated_at DESC
+       LIMIT $3`,
+      [sessionId, finalIds, maxConnectionRows]
+    ),
+  ]);
 
   return {
-    nodes: nodeResult.rows.map((row) => ({
+    nodes: nodesResult.rows.map((row) => ({
       id: row.id,
       name: row.name,
       type: row.type,
       summary: row.summary,
       timesUpdated: row.times_updated,
     })),
-    edges: edgeResult.rows.map((row) => ({
+    connections: connectionsResult.rows.map((row) => ({
       id: row.id,
       source: row.source,
       target: row.target,
-      relationType: row.relation_type,
-      summary: row.summary,
+      strength: Number(row.strength ?? 0),
+      rationale: row.rationale ?? '',
     })),
   };
 }
 
-async function loadAdminGraphSnapshot(sessionId: string): Promise<{
+async function loadAdminGraphSnapshot(sessionId: string, config?: WorldStatePropagationConfig): Promise<{
   nodes: AdminGraphSnapshotNode[];
   edges: AdminGraphSnapshotEdge[];
 }> {
+  const normalizedConfig = config ?? await getSessionWorldStateConfig(sessionId) ?? DEFAULT_WORLD_STATE_CONFIG;
+  const threshold = normalizedConfig.connectionDisplayThreshold;
   const [nodesResult, edgesResult] = await Promise.all([
     pool.query(
       `SELECT id, name, type, summary, attributes, times_updated, updated_at
@@ -419,22 +602,23 @@ async function loadAdminGraphSnapshot(sessionId: string): Promise<{
     ),
     pool.query(
       `SELECT
-         e.id,
-         e.source_node_id,
-         e.target_node_id,
+         c.id,
+         c.source_node_id,
+         c.target_node_id,
          source.name AS source_name,
          target.name AS target_name,
-         e.relation_type,
-         e.summary,
-         e.weight,
-         e.times_updated,
-         e.updated_at
-       FROM world_state_edges e
-       JOIN world_state_nodes source ON source.id = e.source_node_id
-       JOIN world_state_nodes target ON target.id = e.target_node_id
-       WHERE e.session_id = $1
-       ORDER BY source.name ASC, target.name ASC, e.relation_type ASC`,
-      [sessionId]
+         c.strength,
+         c.rationale,
+         c.times_updated,
+         c.updated_at
+       FROM world_state_connections c
+       JOIN world_state_nodes source ON source.id = c.source_node_id
+       JOIN world_state_nodes target ON target.id = c.target_node_id
+       WHERE c.session_id = $1
+         AND (c.strength >= $2 OR c.times_updated > 0)
+       ORDER BY c.strength DESC, source.name ASC, target.name ASC
+       LIMIT 600`,
+      [sessionId, threshold]
     ),
   ]);
 
@@ -454,9 +638,9 @@ async function loadAdminGraphSnapshot(sessionId: string): Promise<{
       targetNodeId: row.target_node_id,
       sourceName: row.source_name,
       targetName: row.target_name,
-      relationType: row.relation_type,
-      summary: row.summary,
-      weight: row.weight,
+      relationType: 'CONNECTION_STRENGTH',
+      summary: row.rationale,
+      weight: Number(row.strength ?? 0),
       timesUpdated: row.times_updated,
       updatedAt: row.updated_at,
     })),
@@ -483,7 +667,11 @@ async function loadNodeById(sessionId: string, nodeId: string): Promise<NodeReco
   };
 }
 
-async function loadRelatedNodes(sessionId: string, nodeId: string): Promise<RelatedNodeRecord[]> {
+async function loadRelatedNodes(
+  sessionId: string,
+  nodeId: string,
+  config: WorldStatePropagationConfig
+): Promise<RelatedNodeRecord[]> {
   const result = await pool.query(
     `SELECT
        neighbor.id,
@@ -491,20 +679,21 @@ async function loadRelatedNodes(sessionId: string, nodeId: string): Promise<Rela
        neighbor.type,
        neighbor.summary,
        neighbor.times_updated,
-       CASE WHEN e.source_node_id = $2 THEN 'outgoing' ELSE 'incoming' END AS direction,
-       e.relation_type,
-       e.summary AS relation_summary
-     FROM world_state_edges e
+       CASE WHEN c.source_node_id = $2 THEN 'outgoing' ELSE 'incoming' END AS direction,
+       c.strength,
+       c.rationale
+     FROM world_state_connections c
      JOIN world_state_nodes neighbor
        ON neighbor.id = CASE
-         WHEN e.source_node_id = $2 THEN e.target_node_id
-         ELSE e.source_node_id
+         WHEN c.source_node_id = $2 THEN c.target_node_id
+         ELSE c.source_node_id
        END
-     WHERE e.session_id = $1
-       AND (e.source_node_id = $2 OR e.target_node_id = $2)
-     ORDER BY e.times_updated DESC, neighbor.times_updated DESC, neighbor.name ASC
-     LIMIT 40`,
-    [sessionId, nodeId]
+     WHERE c.session_id = $1
+       AND (c.source_node_id = $2 OR c.target_node_id = $2)
+       AND (c.strength > 0 OR c.times_updated > 0)
+     ORDER BY c.strength DESC, c.times_updated DESC, neighbor.times_updated DESC, neighbor.name ASC
+     LIMIT $3`,
+    [sessionId, nodeId, Math.max(1, config.maxNeighborsPerNode * 2)]
   );
 
   return result.rows.map((row) => ({
@@ -514,8 +703,41 @@ async function loadRelatedNodes(sessionId: string, nodeId: string): Promise<Rela
     summary: row.summary,
     timesUpdated: row.times_updated,
     direction: row.direction === 'incoming' ? 'incoming' : 'outgoing',
-    relationType: row.relation_type,
-    relationSummary: row.relation_summary,
+    connectionStrength: Number(row.strength ?? 0),
+    connectionRationale: row.rationale ?? '',
+  }));
+}
+
+async function loadPropagationCandidates(
+  sessionId: string,
+  sourceNodeId: string,
+  config: WorldStatePropagationConfig
+): Promise<ConnectionCandidate[]> {
+  const result = await pool.query(
+    `SELECT
+       c.id,
+       c.source_node_id,
+       c.target_node_id,
+       target.name AS target_name,
+       c.strength,
+       c.rationale
+     FROM world_state_connections c
+     JOIN world_state_nodes target ON target.id = c.target_node_id
+     WHERE c.session_id = $1
+       AND c.source_node_id = $2
+       AND c.strength > 0
+     ORDER BY c.strength DESC, c.times_updated DESC, c.updated_at DESC
+     LIMIT $3`,
+    [sessionId, sourceNodeId, config.maxCandidateNeighbors]
+  );
+
+  return result.rows.map((row) => ({
+    id: row.id,
+    sourceNodeId: row.source_node_id,
+    targetNodeId: row.target_node_id,
+    targetName: row.target_name,
+    strength: Number(row.strength ?? 0),
+    rationale: row.rationale ?? '',
   }));
 }
 
@@ -548,32 +770,6 @@ async function updateJob(
   );
 }
 
-async function createsDirectedLoop(
-  client: PoolClient,
-  sessionId: string,
-  sourceNodeId: string,
-  targetNodeId: string
-): Promise<boolean> {
-  const result = await client.query(
-    `WITH RECURSIVE walk(node_id) AS (
-       SELECT target_node_id
-       FROM world_state_edges
-       WHERE session_id = $1 AND source_node_id = $2
-       UNION
-       SELECT e.target_node_id
-       FROM world_state_edges e
-       JOIN walk w ON e.source_node_id = w.node_id
-       WHERE e.session_id = $1
-     )
-     SELECT 1
-     FROM walk
-     WHERE node_id = $3
-     LIMIT 1`,
-    [sessionId, targetNodeId, sourceNodeId]
-  );
-  return result.rows.length > 0;
-}
-
 async function upsertNode(
   client: PoolClient,
   sessionId: string,
@@ -583,7 +779,7 @@ async function upsertNode(
 ): Promise<{ id: string; name: string; type: string; summary: string; created: boolean }> {
   const name = cleanName(draft.name);
   const type = cleanType(draft.type);
-  const summary = cleanText(draft.summary, '', 1200);
+  const rawSummary = cleanText(draft.summary, '', 5000);
   const attributes = attributesToRecord(draft.attributes);
 
   const existing = await client.query(
@@ -597,11 +793,14 @@ async function upsertNode(
   if (existing.rows.length > 0) {
     const row = existing.rows[0];
     const mergedAttributes = mergeAttributes(row.attributes, attributes);
+    const summary = rawSummary
+      ? mergeWorldNodeSummary(row.summary, rawSummary, name)
+      : normalizeWorldNodeSummary(row.summary, name);
     await client.query(
       `UPDATE world_state_nodes
        SET name = $1,
            type = $2,
-           summary = CASE WHEN $3 = '' THEN summary ELSE $3 END,
+           summary = $3,
            attributes = $4,
            times_updated = times_updated + $5,
            last_seen_headline_id = COALESCE($6, last_seen_headline_id)
@@ -616,8 +815,10 @@ async function upsertNode(
         row.id,
       ]
     );
-    return { id: row.id, name, type, summary: summary || row.summary || '', created: false };
+    return { id: row.id, name, type, summary, created: false };
   }
+
+  const summary = normalizeWorldNodeSummary(rawSummary, name);
 
   const inserted = await client.query(
     `INSERT INTO world_state_nodes
@@ -635,89 +836,115 @@ async function upsertNode(
     ]
   );
 
-  return { id: inserted.rows[0].id, name, type, summary, created: true };
+  const insertedId = inserted.rows[0].id;
+  await ensureDenseConnectionsForNode(client, sessionId, insertedId);
+
+  return { id: insertedId, name, type, summary, created: true };
 }
 
-async function upsertEdge(
+async function ensureDenseConnectionsForNode(
   client: PoolClient,
   sessionId: string,
-  draft: WorldEdgeDraft,
+  nodeId: string
+): Promise<void> {
+  await client.query(
+    `INSERT INTO world_state_connections (session_id, source_node_id, target_node_id, strength, rationale)
+     SELECT $1, $2, other.id, 0, ''
+     FROM world_state_nodes other
+     WHERE other.session_id = $1 AND other.id <> $2
+     ON CONFLICT (session_id, source_node_id, target_node_id) DO NOTHING`,
+    [sessionId, nodeId]
+  );
+
+  await client.query(
+    `INSERT INTO world_state_connections (session_id, source_node_id, target_node_id, strength, rationale)
+     SELECT $1, other.id, $2, 0, ''
+     FROM world_state_nodes other
+     WHERE other.session_id = $1 AND other.id <> $2
+     ON CONFLICT (session_id, source_node_id, target_node_id) DO NOTHING`,
+    [sessionId, nodeId]
+  );
+}
+
+async function ensureDenseConnectionsForSession(client: PoolClient, sessionId: string): Promise<void> {
+  await client.query(
+    `INSERT INTO world_state_connections (session_id, source_node_id, target_node_id, strength, rationale)
+     SELECT source.session_id, source.id, target.id, 0, ''
+     FROM world_state_nodes source
+     JOIN world_state_nodes target
+       ON target.session_id = source.session_id
+      AND target.id <> source.id
+     WHERE source.session_id = $1
+     ON CONFLICT (session_id, source_node_id, target_node_id) DO NOTHING`,
+    [sessionId]
+  );
+}
+
+async function upsertConnectionStrength(
+  client: PoolClient,
+  sessionId: string,
+  draft: WorldConnectionDraft,
   headlineId: string | null,
-  increment: number,
-  allowCycles = true
+  increment: number
 ): Promise<{ created: boolean; selfEdgeSkipped: boolean; rejected: boolean }> {
-  const source = await upsertNode(
-    client,
-    sessionId,
-    {
-      name: draft.source,
-      type: 'entity',
-      summary: '',
-      attributes: [],
-    },
-    headlineId,
-    0
-  );
-  const target = await upsertNode(
-    client,
-    sessionId,
-    {
-      name: draft.target,
-      type: 'entity',
-      summary: '',
-      attributes: [],
-    },
-    headlineId,
-    0
-  );
+  const source = await upsertNode(client, sessionId, {
+    name: draft.source,
+    type: 'entity',
+    summary: '',
+    attributes: [],
+  }, headlineId, 0);
+  const target = await upsertNode(client, sessionId, {
+    name: draft.target,
+    type: 'entity',
+    summary: '',
+    attributes: [],
+  }, headlineId, 0);
 
   if (source.id === target.id) {
     return { created: false, selfEdgeSkipped: true, rejected: false };
   }
 
-  const relationType = cleanRelationType(draft.relationType);
-  const summary = cleanText(draft.summary, '', 1000);
-  const weight = clampNumber(draft.weight, 0, 5);
+  const strength = clampNumber(Number(draft.strength ?? 0), 0, 1);
+  const rationale = cleanText(draft.rationale, '', 1000);
 
   const existing = await client.query(
     `SELECT id
-     FROM world_state_edges
+     FROM world_state_connections
      WHERE session_id = $1
        AND source_node_id = $2
        AND target_node_id = $3
-       AND lower(relation_type) = lower($4)
      FOR UPDATE`,
-    [sessionId, source.id, target.id, relationType]
+    [sessionId, source.id, target.id]
   );
 
   if (existing.rows.length > 0) {
     await client.query(
-      `UPDATE world_state_edges
-       SET summary = CASE WHEN $1 = '' THEN summary ELSE $1 END,
-           weight = $2,
+      `UPDATE world_state_connections
+       SET strength = $1,
+           rationale = CASE WHEN $2 = '' THEN rationale ELSE $2 END,
            times_updated = times_updated + $3,
            last_seen_headline_id = COALESCE($4, last_seen_headline_id)
        WHERE id = $5`,
-      [summary, weight, increment, headlineId, existing.rows[0].id]
+      [strength, rationale, increment, headlineId, existing.rows[0].id]
     );
     return { created: false, selfEdgeSkipped: false, rejected: false };
   }
 
-  if (!allowCycles && await createsDirectedLoop(client, sessionId, source.id, target.id)) {
-    return { created: false, selfEdgeSkipped: false, rejected: true };
-  }
-
   await client.query(
-    `INSERT INTO world_state_edges
-       (session_id, source_node_id, target_node_id, relation_type, summary, weight, times_updated, first_seen_headline_id, last_seen_headline_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
+    `INSERT INTO world_state_connections
+       (session_id, source_node_id, target_node_id, strength, rationale, times_updated, first_seen_headline_id, last_seen_headline_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+     ON CONFLICT (session_id, source_node_id, target_node_id) DO UPDATE
+     SET strength = EXCLUDED.strength,
+         rationale = CASE WHEN EXCLUDED.rationale = '' THEN world_state_connections.rationale ELSE EXCLUDED.rationale END,
+         times_updated = world_state_connections.times_updated + EXCLUDED.times_updated,
+         last_seen_headline_id = COALESCE(EXCLUDED.last_seen_headline_id, world_state_connections.last_seen_headline_id)`,
     [
       sessionId,
       source.id,
       target.id,
-      relationType,
-      summary,
-      weight,
+      strength,
+      rationale,
       Math.max(0, increment),
       headlineId,
     ]
@@ -728,8 +955,7 @@ async function upsertEdge(
 
 async function applyInitialGraph(
   sessionId: string,
-  output: InitialWorldStateOutput,
-  config: WorldStatePropagationConfig
+  output: InitialWorldStateOutput
 ): Promise<UpsertCounts> {
   const client = await pool.connect();
   const counts = emptyCounts();
@@ -743,8 +969,10 @@ async function applyInitialGraph(
       else counts.nodesUpdated++;
     }
 
-    for (const edge of output.edges) {
-      const result = await upsertEdge(client, sessionId, edge, null, 0, config.allowCycles);
+    await ensureDenseConnectionsForSession(client, sessionId);
+
+    for (const connection of output.connectionUpdates) {
+      const result = await upsertConnectionStrength(client, sessionId, connection, null, 0);
       if (result.selfEdgeSkipped) counts.selfEdgesSkipped++;
       else if (result.rejected) counts.edgesRejected++;
       else if (result.created) counts.edgesCreated++;
@@ -765,7 +993,6 @@ async function applyHeadlineIntake(
   sessionId: string,
   headlineId: string,
   output: HeadlineWorldStateIntakeOutput,
-  config: WorldStatePropagationConfig,
   onStage?: (stage: string) => Promise<void>
 ): Promise<HeadlineUpsertResult & { directEvents: PropagationEvent[] }> {
   const client = await pool.connect();
@@ -791,12 +1018,12 @@ async function applyHeadlineIntake(
       });
     }
 
-    await onStage?.('updating_initial_relationships');
-    for (const edge of output.edges) {
-      const edgeResult = await upsertEdge(client, sessionId, edge, headlineId, 1, config.allowCycles);
-      if (edgeResult.selfEdgeSkipped) result.selfEdgesSkipped++;
-      else if (edgeResult.rejected) result.edgesRejected++;
-      else if (edgeResult.created) result.edgesCreated++;
+    await onStage?.('updating_connection_strengths');
+    for (const connection of output.connectionUpdates) {
+      const connectionResult = await upsertConnectionStrength(client, sessionId, connection, headlineId, 1);
+      if (connectionResult.selfEdgeSkipped) result.selfEdgesSkipped++;
+      else if (connectionResult.rejected) result.edgesRejected++;
+      else if (connectionResult.created) result.edgesCreated++;
       else result.edgesUpdated++;
     }
 
@@ -842,8 +1069,7 @@ async function applyAffectedReaction(
   sessionId: string,
   headlineId: string,
   node: NodeRecord,
-  output: EntityReactionOutput,
-  config: WorldStatePropagationConfig
+  output: EntityReactionOutput
 ): Promise<HeadlineUpsertResult> {
   const client = await pool.connect();
   const result: HeadlineUpsertResult = {
@@ -873,11 +1099,11 @@ async function applyAffectedReaction(
     if (nodeResult.created) result.nodesCreated++;
     else result.nodesUpdated++;
 
-    for (const edge of output.edges) {
-      const edgeResult = await upsertEdge(client, sessionId, edge, headlineId, 1, config.allowCycles);
-      if (edgeResult.selfEdgeSkipped) result.selfEdgesSkipped++;
-      else if (edgeResult.rejected) result.edgesRejected++;
-      else if (edgeResult.created) result.edgesCreated++;
+    for (const connection of output.connectionUpdates) {
+      const connectionResult = await upsertConnectionStrength(client, sessionId, connection, headlineId, 1);
+      if (connectionResult.selfEdgeSkipped) result.selfEdgesSkipped++;
+      else if (connectionResult.rejected) result.edgesRejected++;
+      else if (connectionResult.created) result.edgesCreated++;
       else result.edgesUpdated++;
     }
 
@@ -1012,9 +1238,78 @@ async function generateInitialGraph(sessionId: string) {
   });
 }
 
-async function generateHeadlineIntake(job: WorldStateJobRow) {
+async function generateNodePicker(
+  sessionId: string,
+  query: string,
+  purpose: 'headline_intake' | 'world_helper',
+  catalog: NodeCatalogEntry[],
+  config: WorldStatePropagationConfig
+) {
+  const client = await getWorldClient(sessionId);
+  return client.callResponsesApi<NodePickerOutput>({
+    input: buildNodePickerPrompt({
+      purpose,
+      query,
+      nodeCatalog: catalog,
+      maxSelections: Math.min(config.maxContextNodes, 20),
+    }),
+    instructions: buildWorldStateInstructions(),
+    jsonSchema: nodePickerJsonSchema,
+    temperature: 0.05,
+  });
+}
+
+async function selectContextNodeIds(
+  sessionId: string,
+  query: string,
+  catalog: NodeCatalogEntry[],
+  config: WorldStatePropagationConfig,
+  purpose: 'headline_intake' | 'world_helper'
+): Promise<string[]> {
+  if (catalog.length === 0) return [];
+
+  const keywordIds = pickCatalogNodesByKeywords(catalog, query, config.maxContextNodes);
+  if (config.retrievalStrategy === 'weighted') {
+    return keywordIds;
+  }
+
+  try {
+    const picker = await generateNodePicker(sessionId, query, purpose, catalog, config);
+    const catalogIds = new Set(catalog.map((node) => node.id));
+    const catalogNames = new Map(catalog.map((node) => [node.name.toLowerCase(), node.id]));
+    const pickedIds = picker.output.relevantNodes
+      .map((node) => catalogIds.has(node.nodeId) ? node.nodeId : catalogNames.get(cleanName(node.nodeName).toLowerCase()))
+      .filter((nodeId): nodeId is string => Boolean(nodeId));
+    return [...new Set([...pickedIds, ...keywordIds])].slice(0, config.maxContextNodes);
+  } catch (error) {
+    console.warn(`[WorldState ${sessionId}] Node picker failed, falling back to keyword context:`, error);
+    return keywordIds;
+  }
+}
+
+export async function loadWorldStateContextForQuery(
+  sessionId: string,
+  query: string,
+  purpose: 'headline_intake' | 'world_helper' = 'world_helper'
+): Promise<{ nodes: GraphSnapshotNode[]; connections: ContextConnection[]; config: WorldStatePropagationConfig }> {
+  const config = await getSessionWorldStateConfig(sessionId) ?? DEFAULT_WORLD_STATE_CONFIG;
+  const nodeCatalog = await loadNodeCatalog(sessionId);
+  const selectedNodeIds = await selectContextNodeIds(sessionId, query, nodeCatalog, config, purpose);
+  const context = await loadContextSlice(sessionId, selectedNodeIds, config);
+  return { ...context, config };
+}
+
+async function generateHeadlineIntake(job: WorldStateJobRow, config: WorldStatePropagationConfig) {
   const input = job.input_snapshot as unknown as HeadlineUpdateJobInput;
-  const snapshot = await loadGraphSnapshot(job.session_id);
+  const nodeCatalog = await loadNodeCatalog(job.session_id);
+  const selectedNodeIds = await selectContextNodeIds(
+    job.session_id,
+    `${input.headlineText}\n${input.storyDirection}`,
+    nodeCatalog,
+    config,
+    'headline_intake'
+  );
+  const context = await loadContextSlice(job.session_id, selectedNodeIds, config);
   const client = await getWorldClient(job.session_id);
 
   return client.callResponsesApi<HeadlineWorldStateIntakeOutput>({
@@ -1024,8 +1319,9 @@ async function generateHeadlineIntake(job: WorldStateJobRow) {
       playerNickname: input.playerNickname,
       roundNo: input.roundNo,
       inGameSubmittedAt: input.inGameSubmittedAt,
-      nodes: snapshot.nodes,
-      edges: snapshot.edges,
+      nodeCatalog,
+      contextNodes: context.nodes,
+      contextConnections: context.connections,
     }),
     instructions: buildWorldStateInstructions(),
     jsonSchema: headlineWorldStateIntakeJsonSchema,
@@ -1088,7 +1384,7 @@ async function processPropagationEvent(
     return [];
   }
 
-  const relatedNodes = await loadRelatedNodes(job.session_id, node.id);
+  const relatedNodes = await loadRelatedNodes(job.session_id, node.id, config);
 
   try {
     const aiResult = await generateEntityReaction(client, input, node, event, relatedNodes, config);
@@ -1114,7 +1410,7 @@ async function processPropagationEvent(
           stateDelta: aiResult.output.summaryDelta,
           updatedSummary: aiResult.output.updatedSummary || node.summary,
           emittedEvents: aiResult.output.emittedEvents,
-          proposedEdges: aiResult.output.edges,
+          proposedEdges: aiResult.output.connectionUpdates,
           model: aiResult.model,
           usage: aiResult.usage,
         });
@@ -1123,7 +1419,7 @@ async function processPropagationEvent(
     }
 
     stats.affectedCount++;
-    const updateCounts = await applyAffectedReaction(job.session_id, job.headline_id!, node, aiResult.output, config);
+    const updateCounts = await applyAffectedReaction(job.session_id, job.headline_id!, node, aiResult.output);
     mergeCounts(aggregate, updateCounts);
     addAffectedNode(aggregate.affectedNodes, {
       id: node.id,
@@ -1144,41 +1440,64 @@ async function processPropagationEvent(
       stateDelta: aiResult.output.summaryDelta,
       updatedSummary: aiResult.output.updatedSummary,
       emittedEvents: aiResult.output.emittedEvents,
-      proposedEdges: aiResult.output.edges,
+      proposedEdges: aiResult.output.connectionUpdates,
       model: aiResult.model,
       usage: aiResult.usage,
     });
 
-    const relatedByName = new Map(
-      relatedNodes.map((related) => [related.name.toLowerCase(), related])
-    );
     const nextDepth = event.depth + 1;
 
     if (nextDepth > config.maxPropagationDepth) {
       return [];
     }
 
+    const emittedByName = new Map(
+      aiResult.output.emittedEvents.map((emittedEvent) => [
+        cleanName(emittedEvent.targetNodeName).toLowerCase(),
+        emittedEvent,
+      ])
+    );
+    const candidates = await loadPropagationCandidates(job.session_id, node.id, config);
     const emitted: PropagationEvent[] = [];
-    for (const [index, emittedEvent] of aiResult.output.emittedEvents.entries()) {
-      const targetName = cleanName(emittedEvent.targetNodeName);
-      const target = relatedByName.get(targetName.toLowerCase());
-      if (!target || target.id === node.id) {
+    for (const [index, candidate] of candidates.entries()) {
+      if (candidate.targetNodeId === node.id) {
         continue;
       }
 
+      const seed = [
+        job.session_id,
+        job.id,
+        event.sourceEventId,
+        node.id,
+        candidate.targetNodeId,
+        nextDepth,
+      ].join(':');
+      if (!shouldPropagateByConnection(candidate.strength, config, seed)) {
+        continue;
+      }
+
+      const modelEvent = emittedByName.get(candidate.targetName.toLowerCase());
       stats.emittedEventCount++;
       emitted.push({
         id: cleanEventId(
-          `${event.sourceEventId}:${node.id.slice(0, 8)}:${target.id.slice(0, 8)}:${nextDepth}:${index + 1}`,
+          `${event.sourceEventId}:${node.id.slice(0, 8)}:${candidate.targetNodeId.slice(0, 8)}:${nextDepth}:${index + 1}`,
           `prop_${nextDepth}_${index + 1}`
         ),
         sourceEventId: event.sourceEventId,
         sourceNodeId: node.id,
         sourceNodeName: node.name,
-        targetNodeId: target.id,
-        targetNodeName: target.name,
-        eventSummary: cleanText(emittedEvent.eventSummary, '', 1200),
-        evidence: cleanText(emittedEvent.relationshipRationale || aiResult.output.rationale, '', 1200),
+        targetNodeId: candidate.targetNodeId,
+        targetNodeName: candidate.targetName,
+        eventSummary: cleanText(
+          modelEvent?.eventSummary || `${node.name} changed in a way that may affect ${candidate.targetName}.`,
+          '',
+          1200
+        ),
+        evidence: cleanText(
+          modelEvent?.relationshipRationale || candidate.rationale || aiResult.output.rationale,
+          '',
+          1200
+        ),
         depth: nextDepth,
       });
     }
@@ -1335,6 +1654,7 @@ export async function getWorldStateForJoinCode(joinCode: string) {
   }
 
   const session = sessionResult.rows[0];
+  const worldConfig = normalizeWorldStateConfig(session.world_state_config);
   const includeAllJobs = session.phase === 'FINISHED';
   const [nodesResult, edgesResult, jobsResult, queueResult] = await Promise.all([
     pool.query(
@@ -1346,22 +1666,23 @@ export async function getWorldStateForJoinCode(joinCode: string) {
     ),
     pool.query(
       `SELECT
-         e.id,
-         e.source_node_id,
-         e.target_node_id,
+         c.id,
+         c.source_node_id,
+         c.target_node_id,
          source.name AS source_name,
          target.name AS target_name,
-         e.relation_type,
-         e.summary,
-         e.weight,
-         e.times_updated,
-         e.updated_at
-       FROM world_state_edges e
-       JOIN world_state_nodes source ON source.id = e.source_node_id
-       JOIN world_state_nodes target ON target.id = e.target_node_id
-       WHERE e.session_id = $1
-       ORDER BY e.times_updated DESC, e.updated_at DESC`,
-      [session.id]
+         c.strength,
+         c.rationale,
+         c.times_updated,
+         c.updated_at
+       FROM world_state_connections c
+       JOIN world_state_nodes source ON source.id = c.source_node_id
+       JOIN world_state_nodes target ON target.id = c.target_node_id
+       WHERE c.session_id = $1
+         AND (c.strength >= $2 OR c.times_updated > 0)
+       ORDER BY c.strength DESC, c.times_updated DESC, c.updated_at DESC
+       LIMIT 600`,
+      [session.id, worldConfig.connectionDisplayThreshold]
     ),
     pool.query(
       `WITH recent_jobs AS (
@@ -1467,9 +1788,9 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       pausedAt: session.paused_at,
       pauseRemainingMs: session.pause_remaining_ms,
       timelineSpeedRatio: session.timeline_speed_ratio,
-      llmConfig: session.llm_config,
-      moduleLlmConfig: session.module_llm_config ?? {},
-      worldStateConfig: normalizeWorldStateConfig(session.world_state_config),
+      llmConfig: normalizeJsonModelSelection(session.llm_config),
+      moduleLlmConfig: normalizeModuleLlmConfig(session.module_llm_config),
+      worldStateConfig: worldConfig,
       summaryConfig: session.summary_config ?? {},
       players: session.players ?? [],
     },
@@ -1495,9 +1816,9 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       targetNodeId: row.target_node_id,
       sourceName: row.source_name,
       targetName: row.target_name,
-      relationType: row.relation_type,
-      summary: row.summary,
-      weight: row.weight,
+      relationType: 'CONNECTION_STRENGTH',
+      summary: row.rationale,
+      weight: Number(row.strength ?? 0),
       timesUpdated: row.times_updated,
       updatedAt: row.updated_at,
     })),
@@ -1760,8 +2081,8 @@ export class WorldStateProcessor {
       },
     });
     const config = await getSessionWorldStateConfig(job.session_id) ?? DEFAULT_WORLD_STATE_CONFIG;
-    const counts = await applyInitialGraph(job.session_id, aiResult.output, config);
-    const graphSnapshot = await loadAdminGraphSnapshot(job.session_id);
+    const counts = await applyInitialGraph(job.session_id, aiResult.output);
+    const graphSnapshot = await loadAdminGraphSnapshot(job.session_id, config);
 
     await updateJob(job.id, 'completed', {
       status: 'completed',
@@ -1790,7 +2111,7 @@ export class WorldStateProcessor {
     }
 
     await updateJob(job.id, 'headline_intake_agent');
-    const aiResult = await generateHeadlineIntake(job);
+    const aiResult = await generateHeadlineIntake(job, config);
     if (!(await this.isJobStillRunning(job.id))) {
       return;
     }
@@ -1809,7 +2130,6 @@ export class WorldStateProcessor {
       job.session_id,
       job.headline_id,
       aiResult.output,
-      config,
       async (stage) => updateJob(job.id, stage)
     );
 
@@ -1829,7 +2149,7 @@ export class WorldStateProcessor {
       return;
     }
 
-    const graphSnapshot = await loadAdminGraphSnapshot(job.session_id);
+    const graphSnapshot = await loadAdminGraphSnapshot(job.session_id, config);
 
     await updateJob(job.id, 'completed', {
       status: 'completed',

@@ -17,7 +17,8 @@ import {
   WorldHelperHeadlineContext,
   WorldHelperPromptContext,
   worldHelperAnswerJsonSchema,
-} from './worldHelperPrompt.js';
+} from '../prompts/worldHelperPrompt.js';
+import { loadWorldStateContextForQuery } from './worldStateService.js';
 
 interface AskWorldHelperParams {
   sessionId: string;
@@ -150,6 +151,67 @@ function chunkText(text: string): string[] {
   return chunks.length > 0 ? chunks : [text];
 }
 
+function normalizePolicyText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function isWorldHelperPlayAdviceRequest(question: string): boolean {
+  const text = normalizePolicyText(question);
+  if (!text) return false;
+
+  const generatedOutputRequest =
+    /\b(write|draft|generate|compose|create|make|propose|suggest|give|provide)\b.{0,80}\b(headline|story direction|submission|timeline entry|move|play|idea|ideas|sample|example)\b/.test(text) ||
+    /\b(headline|story direction|submission|timeline entry)\b.{0,80}\b(write|draft|generate|compose|create|make|propose|suggest|give|provide)\b/.test(text) ||
+    /\b(sample|example)\b.{0,40}\b(headline|story direction|submission|timeline entry)\b/.test(text);
+
+  const moveRecommendationRequest =
+    /\b(what|which|who|where|how)\b.{0,80}\b(should|shall|do i|can i|could i)\b.{0,120}\b(submit|write|play|use|pick|choose|target|connect|maximize|win|beat)\b/.test(text) ||
+    /\b(what|which)\b.{0,80}\b(planet|author|headline|entity|actor|connection)\b.{0,80}\b(should|shall|do i|can i|could i)\b/.test(text) ||
+    /\b(help me|tell me how to|show me how to)\b.{0,80}\b(win|maximize|submit|write|play|choose|target)\b/.test(text);
+
+  const strategyRequest =
+    /\b(best|optimal|highest scoring|high scoring|score more|maximize score|max points|most points|winning)\b.{0,100}\b(headline|story direction|submission|move|play|strategy|planet|connection|idea)\b/.test(text) ||
+    /\b(strategy|plan|move)\b.{0,80}\b(for my next|next headline|next submission|to win|to score)\b/.test(text) ||
+    /\b(maximize score|score more|max points|most points|win the game|beat everyone|highest score|high score)\b/.test(text);
+
+  return generatedOutputRequest || moveRecommendationRequest || strategyRequest;
+}
+
+export function buildWorldHelperPolicyBoundaryAnswer(context: WorldHelperPromptContext): WorldHelperAnswer {
+  const phase = context.session.phase;
+  const roundText = context.session.maxRounds > 0
+    ? `Round ${context.session.currentRound} of ${context.session.maxRounds}`
+    : 'the current session';
+
+  return {
+    answerText: [
+      'I can explain the world state, rules, planet panel, timeline evidence, and world-graph context, but I cannot choose your next play, optimize your move, draft a story direction, or provide sample headlines.',
+      `For ${roundText}${phase ? ` (${phase})` : ''}, use this as instruction-level guidance: review the timeline yourself, identify a causal continuation you believe is plausible, check your visible planet panel, and keep the final submission in your own words.`,
+      'Ask me about a specific entity, headline, relationship, planet rule, or scoring mechanic, and I can summarize the relevant evidence without turning it into a recommended submission.',
+    ].join(' '),
+    headlineRefs: [],
+    entityRefs: [],
+    edgeRefs: [],
+    graphSummary: {
+      note: 'Request was limited because World Helper must not generate or recommend playable submissions.',
+      entities: [],
+      edges: [],
+    },
+    suggestedQuestions: [
+      'What does my current planet panel mean?',
+      'How do connection points work?',
+      'What has changed around a named entity?',
+      'Which timeline headlines mention a named actor?',
+    ],
+    confidence: 'high',
+  };
+}
+
 function selectPrivateHistory(
   rows: any[],
   tokens: string[]
@@ -259,6 +321,7 @@ function normalizeHelperAnswer(
     suggestedQuestions: (Array.isArray(raw.suggestedQuestions) ? raw.suggestedQuestions : [])
       .map((question) => cleanString(question, '', 180))
       .filter(Boolean)
+      .filter((question) => !isWorldHelperPlayAdviceRequest(question))
       .slice(0, 4),
     confidence: raw.confidence === 'high' || raw.confidence === 'medium' || raw.confidence === 'low'
       ? raw.confidence
@@ -277,8 +340,6 @@ async function buildHelperContext(
     sessionResult,
     playersResult,
     headlinesResult,
-    nodesResult,
-    edgesResult,
     jobsResult,
     historyResult,
   ] = await Promise.all([
@@ -316,32 +377,6 @@ async function buildHelperContext(
       [sessionId]
     ),
     pool.query(
-      `SELECT id, name, type, summary, times_updated, updated_at
-       FROM world_state_nodes
-       WHERE session_id = $1
-       ORDER BY times_updated DESC, updated_at DESC
-       LIMIT 120`,
-      [sessionId]
-    ),
-    pool.query(
-      `SELECT
-         e.id,
-         source.name AS source_name,
-         target.name AS target_name,
-         e.relation_type,
-         e.summary,
-         e.weight,
-         e.times_updated,
-         e.updated_at
-       FROM world_state_edges e
-       JOIN world_state_nodes source ON source.id = e.source_node_id
-       JOIN world_state_nodes target ON target.id = e.target_node_id
-       WHERE e.session_id = $1
-       ORDER BY e.times_updated DESC, e.updated_at DESC
-       LIMIT 180`,
-      [sessionId]
-    ),
-    pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'running')::int AS running_jobs
        FROM world_state_jobs
@@ -359,6 +394,7 @@ async function buildHelperContext(
   ]);
 
   const session = sessionResult.rows[0];
+  const graphContext = await loadWorldStateContextForQuery(sessionId, question, 'world_helper');
   const serverNow = session ? new Date(session.server_now) : new Date();
   const inGameNow = session
     ? computeInGameNow(
@@ -395,29 +431,22 @@ async function buildHelperContext(
     24
   );
 
-  const entityContexts: WorldHelperEntityContext[] = nodesResult.rows.map((row) => ({
+  const relevantEntities: WorldHelperEntityContext[] = graphContext.nodes.map((row) => ({
     id: row.id,
     name: row.name,
     type: row.type,
     summary: row.summary,
-    timesUpdated: row.times_updated,
+    timesUpdated: row.timesUpdated,
   }));
-
-  const relevantEntities = sortRelevant(
-    entityContexts,
-    (entity) => scoreText([entity.name, entity.type, entity.summary].join(' '), tokens) + Math.min(entity.timesUpdated, 5),
-    (entity) => entity.timesUpdated,
-    16
-  );
   const relevantEntityNames = new Set(relevantEntities.map((entity) => entity.name));
 
-  const edgeContexts: WorldHelperEdgeContext[] = edgesResult.rows.map((row) => ({
-    id: row.id,
-    sourceName: row.source_name,
-    targetName: row.target_name,
-    relationType: row.relation_type,
-    summary: row.summary,
-    weight: Number(row.weight ?? 1),
+  const edgeContexts: WorldHelperEdgeContext[] = graphContext.connections.map((connection) => ({
+    id: connection.id,
+    sourceName: connection.source,
+    targetName: connection.target,
+    relationType: 'CONNECTION_STRENGTH',
+    summary: connection.rationale,
+    weight: connection.strength,
   }));
   const relevantEdges = sortRelevant(
     edgeContexts,
@@ -462,9 +491,9 @@ async function buildHelperContext(
     entities: relevantEntities,
     edges: relevantEdges,
     graphStatus: {
-      available: nodesResult.rows.length > 0,
-      nodeCount: nodesResult.rows.length,
-      edgeCount: edgesResult.rows.length,
+      available: relevantEntities.length > 0,
+      nodeCount: relevantEntities.length,
+      edgeCount: relevantEdges.length,
       runningJobs: jobsResult.rows[0]?.running_jobs ?? 0,
     },
     recentPrivateHistory: selectPrivateHistory(historyResult.rows, tokens),
@@ -490,6 +519,66 @@ export async function askWorldHelper(
       params.playerId,
       params.question
     );
+
+    if (isWorldHelperPlayAdviceRequest(params.question)) {
+      const answer = buildWorldHelperPolicyBoundaryAnswer(context);
+
+      await pool.query(
+        `UPDATE world_helper_messages
+         SET status = 'streaming', model = $2, usage = $3
+         WHERE id = $1`,
+        [
+          messageId,
+          'world-helper-policy',
+          JSON.stringify({}),
+        ]
+      );
+
+      let streamedText = '';
+      for (const chunk of chunkText(answer.answerText)) {
+        streamedText += chunk;
+        await callbacks.onDelta?.({
+          messageId,
+          clientRequestId: params.clientRequestId,
+          delta: chunk,
+          text: streamedText,
+        });
+      }
+
+      const completeResult = await pool.query(
+        `UPDATE world_helper_messages
+         SET status = 'completed',
+             streamed_text = $2,
+             answer = $3,
+             cited_headline_ids = $4,
+             cited_node_ids = $5,
+             cited_edge_ids = $6,
+             model = $7,
+             usage = $8,
+             completed_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [
+          messageId,
+          streamedText,
+          JSON.stringify(answer),
+          JSON.stringify([]),
+          JSON.stringify([]),
+          JSON.stringify([]),
+          'world-helper-policy',
+          JSON.stringify({}),
+        ]
+      );
+
+      const message = rowToMessage(completeResult.rows[0]);
+      await callbacks.onComplete?.({
+        messageId,
+        clientRequestId: params.clientRequestId,
+        message,
+      });
+      return message;
+    }
+
     const selection = await getSessionLlmSelection(params.sessionId, 'helper');
     const config = getJsonProviderConfig('HELPER', selection);
     if (!config.apiKey) {

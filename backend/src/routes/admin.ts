@@ -19,6 +19,7 @@ import {
 } from '../utils/validation.js';
 import { getWorldStateForJoinCode, worldStateProcessor } from '../world/worldStateService.js';
 import { getWorldHelperAdminHistory } from '../world/worldHelperService.js';
+import { normalizeWorldNodeSummary } from '../world/worldNodeDetail.js';
 import evaluationsRouter from './evaluations.js';
 
 const router = Router();
@@ -587,7 +588,7 @@ router.patch('/sessions/:joinCode/world-state/nodes/:nodeId', async (req: Reques
 
     if (parsed.name !== undefined) addUpdate('name', parsed.name.trim());
     if (parsed.type !== undefined) addUpdate('type', parsed.type.trim());
-    if (parsed.summary !== undefined) addUpdate('summary', parsed.summary.trim());
+    if (parsed.summary !== undefined) addUpdate('summary', normalizeWorldNodeSummary(parsed.summary.trim()));
     if (parsed.attributes !== undefined) addUpdate('attributes', JSON.stringify(parsed.attributes));
     if (parsed.timesUpdated !== undefined) addUpdate('times_updated', parsed.timesUpdated);
 

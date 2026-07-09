@@ -4,15 +4,17 @@ import { DEFAULT_SCORING_CONFIG, PlanetPanelEntry } from '../game/scoringTypes.j
 import {
   AiPlayerOutput,
   AiVisibleHeadline,
+  AiWorldHelperInsight,
   buildAiPlayerInstructions,
   buildAiPlayerPrompt,
   aiPlayerJsonSchema,
-} from './aiPlayerPrompt.js';
+} from '../prompts/aiPlayerPrompt.js';
 
 export interface AiPlayerConfig {
   stylePrompt: string;
   creativity: number;
   submitEverySeconds: number;
+  helperActivity: number;
   provider: 'openai' | 'deepseek';
   model: string;
 }
@@ -31,6 +33,7 @@ export const DEFAULT_AI_PLAYER_CONFIG: AiPlayerConfig = {
   stylePrompt: 'Strategic, grounded, specific, and slightly provocative.',
   creativity: 1.0,
   submitEverySeconds: 0,
+  helperActivity: 0.5,
   provider: DEFAULT_AI_PLAYER_PROVIDER,
   model: defaultModelForProvider(DEFAULT_AI_PLAYER_PROVIDER),
 };
@@ -43,6 +46,7 @@ interface GenerateAiStoryDirectionInput {
   maxRounds: number;
   planetPanel: PlanetPanelEntry[];
   headlines: AiVisibleHeadline[];
+  worldHelperInsights?: AiWorldHelperInsight[];
 }
 
 export function normalizeAiPlayerConfig(raw: unknown): AiPlayerConfig {
@@ -53,6 +57,9 @@ export function normalizeAiPlayerConfig(raw: unknown): AiPlayerConfig {
   const submitEverySeconds = typeof source.submitEverySeconds === 'number' && Number.isFinite(source.submitEverySeconds)
     ? Math.min(600, Math.max(0, Math.round(source.submitEverySeconds)))
     : DEFAULT_AI_PLAYER_CONFIG.submitEverySeconds;
+  const helperActivity = typeof source.helperActivity === 'number' && Number.isFinite(source.helperActivity)
+    ? Math.min(1, Math.max(0, source.helperActivity))
+    : DEFAULT_AI_PLAYER_CONFIG.helperActivity;
 
   const provider = source.provider === 'deepseek' || source.provider === 'openai'
     ? source.provider
@@ -64,23 +71,21 @@ export function normalizeAiPlayerConfig(raw: unknown): AiPlayerConfig {
       : DEFAULT_AI_PLAYER_CONFIG.stylePrompt,
     creativity,
     submitEverySeconds,
+    helperActivity,
     provider,
-    model: typeof source.model === 'string' && source.model.trim()
-      ? source.model.trim().slice(0, 80)
-      : defaultModelForProvider(provider),
+    model: provider === 'deepseek'
+      ? DEFAULT_DEEPSEEK_MODEL
+      : (
+          typeof source.model === 'string' && source.model.trim()
+            ? source.model.trim().slice(0, 80)
+            : defaultModelForProvider(provider)
+        ),
   };
 }
 
 function defaultModelForProvider(provider: AiPlayerConfig['provider']): string {
   if (provider === 'deepseek') {
-    return process.env.GAME_TEST_MODE === 'true'
-      ? (
-          process.env.AI_PLAYER_TEST_DEEPSEEK_MODEL ||
-          process.env.AI_PLAYER_TEST_MODEL ||
-          process.env.AI_PLAYER_DEEPSEEK_MODEL ||
-          DEFAULT_DEEPSEEK_MODEL
-        )
-      : (process.env.AI_PLAYER_DEEPSEEK_MODEL || process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL);
+    return DEFAULT_DEEPSEEK_MODEL;
   }
 
   return process.env.GAME_TEST_MODE === 'true'
@@ -100,6 +105,35 @@ export function scoringSummary(): string {
     'Planet bonus is real-time and based on the juror-selected rank-1/primary planet: +2 for the current least-used band, +1 for the middle band, +0 for the most-used band.',
     `Best target pattern: accepted headline + P3 plausibility + 3 distinct other-author connections + a +2 primary planet = up to ${maxHeadlineScore} points.`,
   ].join('\n');
+}
+
+export function buildAiWorldHelperQuestion(input: GenerateAiStoryDirectionInput): string {
+  const recentTimeline = input.headlines
+    .slice(-12)
+    .map((headline) => {
+      const planets = headline.planets.length > 0 ? headline.planets.join('/') : 'unknown planets';
+      return `- ${headline.playerNickname}, R${headline.roundNo}: ${headline.text} (${planets})`;
+    })
+    .join('\n') || 'No accepted timeline headlines yet.';
+
+  const planetPanel = input.planetPanel
+    .map((planet) => `- ${planet.id}: visible bonus +${planet.band}, current usage ${planet.usage}`)
+    .join('\n');
+
+  return `I am a Future Headlines player reviewing the current game state as ${input.nickname}.
+
+Give a neutral world-state briefing only. Summarize relevant current actors, entity states, relationships, tensions, and uncertainty from the world graph and visible timeline.
+
+Boundary: no playable guidance, no headline ideas, no sample headlines, no story directions, no move recommendations, no planet targets, no scoring strategy, and no entity-combination advice.
+
+Current in-game date: ${input.inGameNow ?? 'not available'}
+Round: ${input.currentRound} of ${input.maxRounds}
+
+Visible planet panel, for context only:
+${planetPanel || 'No planet panel is available.'}
+
+Recent public timeline:
+${recentTimeline}`;
 }
 
 export async function generateAiStoryDirection(input: GenerateAiStoryDirectionInput): Promise<AiPlayerOutput> {
@@ -134,6 +168,7 @@ export async function generateAiStoryDirection(input: GenerateAiStoryDirectionIn
     scoringSummary: scoringSummary(),
     planetPanel: input.planetPanel,
     headlines: input.headlines,
+    worldHelperInsights: input.worldHelperInsights,
   });
 
   const result = await client.callResponsesApi<AiPlayerOutput>({
@@ -168,12 +203,13 @@ async function generateWithDeepSeek(input: GenerateAiStoryDirectionInput): Promi
     scoringSummary: scoringSummary(),
     planetPanel: input.planetPanel,
     headlines: input.headlines,
+    worldHelperInsights: input.worldHelperInsights,
   });
 
   const client = createJsonModelClient({
     provider: 'deepseek',
     apiKey,
-    model: input.config.model || defaultModelForProvider('deepseek'),
+    model: DEFAULT_DEEPSEEK_MODEL,
     baseUrl: isTestMode
       ? (process.env.AI_PLAYER_TEST_DEEPSEEK_BASE_URL || process.env.AI_PLAYER_TEST_BASE_URL || process.env.AI_PLAYER_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com')
       : (process.env.AI_PLAYER_DEEPSEEK_BASE_URL || process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com'),

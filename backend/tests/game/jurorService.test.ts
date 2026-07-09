@@ -8,7 +8,7 @@ import {
   resetJurorClient,
   JurorValidationError,
 } from '../../src/game/jurorService';
-import { JurorEvaluationOutput } from '../../src/llm/jurorPrompt';
+import { JurorEvaluationOutput } from '../../src/prompts/jurorPrompt';
 import { OpenAIClient } from '../../src/llm/openaiResponsesClient';
 
 describe('Juror Service', () => {

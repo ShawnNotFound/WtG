@@ -73,7 +73,7 @@ There is no root README; this document is the entry point.
 DATABASE_URL=postgres://USER:PASS@HOST:5432/DBNAME
 LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY=sk-...
-DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_MODEL=deepseek-v4-flash
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.5              # optional, this is the OpenAI default

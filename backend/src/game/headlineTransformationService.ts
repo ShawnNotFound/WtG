@@ -11,7 +11,7 @@ import {
   PlanetsResult,
   LinkedHeadline,
   HeadlineBands,
-} from '../llm/jurorPrompt.js';
+} from '../prompts/jurorPrompt.js';
 import { evaluateJuror, JurorEvaluationResult } from './jurorService.js';
 import { rollDice, selectHeadline } from './diceRoll.js';
 
@@ -166,4 +166,4 @@ export type {
   PlanetsResult,
   LinkedHeadline,
   HeadlineBands,
-} from '../llm/jurorPrompt.js';
+} from '../prompts/jurorPrompt.js';

@@ -37,6 +37,7 @@ interface InitialAiPlayer {
   stylePrompt: string;
   creativity: number;
   submitEverySeconds: number;
+  helperActivity: number;
   provider: AiProvider;
   model: string;
 }
@@ -57,6 +58,12 @@ interface WorldStateConfig {
   maxEventsPerNode: number;
   nodeAgentConcurrency: number;
   storeUnaffectedDecisions: boolean;
+  retrievalStrategy: 'hybrid' | 'weighted' | 'node_picker';
+  maxContextNodes: number;
+  maxNeighborsPerNode: number;
+  maxCandidateNeighbors: number;
+  connectionDisplayThreshold: number;
+  propagationRandomMode: 'seeded' | 'random' | 'threshold';
 }
 
 interface SummaryConfig {
@@ -71,6 +78,18 @@ const MODULE_LLM_LABELS: Array<{ key: ModuleLlmName; label: string }> = [
   { key: 'helper', label: 'World Helper' },
 ];
 
+const RETRIEVAL_STRATEGY_OPTIONS = [
+  { label: 'Hybrid', value: 'hybrid' },
+  { label: 'Weighted', value: 'weighted' },
+  { label: 'Node picker', value: 'node_picker' },
+];
+
+const PROPAGATION_RANDOM_OPTIONS = [
+  { label: 'Seeded', value: 'seeded' },
+  { label: 'Random', value: 'random' },
+  { label: 'Threshold', value: 'threshold' },
+];
+
 const createDefaultLlmConfig = (provider: AiProvider = 'deepseek'): LlmConfig => ({
   provider,
   model: defaultModelForProvider(provider),
@@ -82,6 +101,7 @@ const createInitialAiPlayer = (index: number): InitialAiPlayer => ({
   stylePrompt: 'Strategic, grounded, specific, and slightly provocative.',
   creativity: 1.0,
   submitEverySeconds: 0,
+  helperActivity: 0.5,
   provider: 'deepseek',
   model: defaultModelForProvider('deepseek'),
 });
@@ -115,6 +135,12 @@ function App() {
     maxEventsPerNode: 2,
     nodeAgentConcurrency: 4,
     storeUnaffectedDecisions: true,
+    retrievalStrategy: 'hybrid',
+    maxContextNodes: 16,
+    maxNeighborsPerNode: 8,
+    maxCandidateNeighbors: 12,
+    connectionDisplayThreshold: 0.15,
+    propagationRandomMode: 'seeded',
   });
   const [moduleLlmConfig, setModuleLlmConfig] = useState<Record<ModuleLlmName, LlmConfig>>({
     juror: createDefaultLlmConfig(),
@@ -744,6 +770,82 @@ function App() {
                       </label>
                     </div>
 
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <label className="text-xs text-gray-500">
+                        Retrieval
+                        <DropdownSelect
+                          value={worldStateConfig.retrievalStrategy}
+                          options={RETRIEVAL_STRATEGY_OPTIONS}
+                          onChange={(value) => setWorldStateConfig((prev) => ({
+                            ...prev,
+                            retrievalStrategy: value as WorldStateConfig['retrievalStrategy'],
+                          }))}
+                          ariaLabel="World retrieval strategy"
+                          size="sm"
+                          menuClassName="z-[70]"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Random mode
+                        <DropdownSelect
+                          value={worldStateConfig.propagationRandomMode}
+                          options={PROPAGATION_RANDOM_OPTIONS}
+                          onChange={(value) => setWorldStateConfig((prev) => ({
+                            ...prev,
+                            propagationRandomMode: value as WorldStateConfig['propagationRandomMode'],
+                          }))}
+                          ariaLabel="World propagation random mode"
+                          size="sm"
+                          menuClassName="z-[70]"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Display threshold
+                        <input
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={worldStateConfig.connectionDisplayThreshold}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, connectionDisplayThreshold: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Context nodes
+                        <input
+                          type="number"
+                          min={4}
+                          max={64}
+                          value={worldStateConfig.maxContextNodes}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxContextNodes: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Neighbors/node
+                        <input
+                          type="number"
+                          min={1}
+                          max={32}
+                          value={worldStateConfig.maxNeighborsPerNode}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxNeighborsPerNode: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                      <label className="text-xs text-gray-500">
+                        Candidate neighbors
+                        <input
+                          type="number"
+                          min={1}
+                          max={64}
+                          value={worldStateConfig.maxCandidateNeighbors}
+                          onChange={(e) => setWorldStateConfig((prev) => ({ ...prev, maxCandidateNeighbors: Number(e.target.value) }))}
+                          className="mt-1 w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-sm"
+                        />
+                      </label>
+                    </div>
+
                     <div className="space-y-2">
                       <p className="text-xs font-medium uppercase tracking-wider text-gray-400">
                         Module LLM Overrides
@@ -854,6 +956,20 @@ function App() {
                               className="mt-1 w-full px-2 py-1.5 text-sm border border-gray-200 rounded-lg bg-gray-50"
                             />
                           </label>
+                          <label className="text-xs text-gray-500">
+                            Helper activity
+                            <input
+                              type="number"
+                              min={0}
+                              max={1}
+                              step={0.05}
+                              value={player.helperActivity}
+                              onChange={(e) => updateInitialAiPlayer(index, { helperActivity: Number(e.target.value) })}
+                              className="mt-1 w-full px-2 py-1.5 text-sm border border-gray-200 rounded-lg bg-gray-50"
+                            />
+                          </label>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
                           <label className="text-xs text-gray-500">
                             Extra delay seconds
                             <input

@@ -20,6 +20,22 @@ export interface AiPlayerPromptInput {
   scoringSummary: string;
   planetPanel: PlanetPanelEntry[];
   headlines: AiVisibleHeadline[];
+  worldHelperInsights?: AiWorldHelperInsight[];
+}
+
+export interface AiWorldHelperInsight {
+  question: string;
+  answerText: string;
+  entityRefs: Array<{
+    name: string;
+    reason: string;
+  }>;
+  edgeRefs: Array<{
+    sourceName: string;
+    targetName: string;
+    relationType: string;
+    reason: string;
+  }>;
 }
 
 export interface AiPlayerOutput {
@@ -61,6 +77,7 @@ Your goal is to score highly while using only the same game information a human 
 - the public scoring rules
 - your real-time visible planet scoring panel
 - the current round and in-game date
+- optional neutral World Helper context requested through the same helper interface available to players
 
 Play to maximize points, not to be merely interesting:
 1. Highest priority: create a story direction that can strongly connect to three distinct other authors' accepted headlines. Three distinct author connections are worth far more than one.
@@ -68,6 +85,8 @@ Play to maximize points, not to be merely interesting:
 3. Use the current +2 planet list as a live scoring target. Make one +2 planet the clear primary theme when it fits; otherwise use a +1 planet. Avoid +0 primary planets unless they are necessary for a much stronger three-author connection.
 4. Name concrete entities, dates, policies, products, incidents, or institutions so the juror has enough evidence to classify the planet and detect links.
 5. Stay within 280 characters.
+
+The World Helper is not allowed to generate playable ideas, sample headlines, or strategy recommendations. Treat helper output only as descriptive world-state context; you must create the story direction yourself from the public game state and neutral context.
 
 Never mention that you are an AI player. Never explain the scoring strategy in the storyDirection. Return only JSON matching the schema.`;
 }
@@ -113,6 +132,26 @@ export function buildAiPlayerPrompt(input: AiPlayerPromptInput): string {
         .join('\n') || 'No other-author headlines are available yet.'
     : 'No other-author headlines are available yet.';
 
+  const helperInsights = input.worldHelperInsights && input.worldHelperInsights.length > 0
+    ? input.worldHelperInsights
+        .map((insight, index) => {
+          const entityRefs = insight.entityRefs.length > 0
+            ? insight.entityRefs.map((ref) => `- ${ref.name}: ${ref.reason}`).join('\n')
+            : 'No cited entities.';
+          const edgeRefs = insight.edgeRefs.length > 0
+            ? insight.edgeRefs.map((ref) => `- ${ref.sourceName} -> ${ref.targetName} [${ref.relationType}]: ${ref.reason}`).join('\n')
+            : 'No cited connections.';
+          return `Helper answer ${index + 1}
+Question: ${insight.question}
+Answer: ${insight.answerText}
+Referenced entities:
+${entityRefs}
+Referenced connections:
+${edgeRefs}`;
+        })
+        .join('\n\n')
+    : 'No World Helper research was requested for this turn.';
+
   return `=== PLAYER ===
 ${input.nickname}
 
@@ -137,6 +176,10 @@ ${connectionTargets}
 
 === PUBLIC TIMELINE HEADLINES ===
 ${headlines}
+
+=== NEUTRAL WORLD HELPER CONTEXT ===
+Use this only as descriptive context about selected world-graph entities and connections. Do not copy it as a play recommendation, and do not assume the helper has chosen your idea for you.
+${helperInsights}
 
 === PLAYER STYLE ===
 ${input.stylePrompt || 'No special style. Be clear, specific, strategic, and concise.'}

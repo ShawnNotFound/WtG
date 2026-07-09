@@ -3,7 +3,7 @@
  * handles random roll generation and mapping to plausibility bands.
  */
 
-import { HeadlineBands, PlausibilityBand } from '../llm/jurorPrompt.js';
+import { HeadlineBands, PlausibilityBand } from '../prompts/jurorPrompt.js';
 
 export interface DiceRollResult {
   /** raw roll value 1-100 */

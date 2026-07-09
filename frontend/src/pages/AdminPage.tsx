@@ -66,6 +66,7 @@ interface AdminPlayer {
     stylePrompt?: string;
     creativity?: number;
     submitEverySeconds?: number;
+    helperActivity?: number;
     provider?: AiProvider;
     model?: string;
   };
@@ -80,6 +81,93 @@ interface WorldNode {
   attributes: Record<string, unknown>;
   timesUpdated: number;
   updatedAt: string;
+}
+
+interface ParsedWorldNodeSummary {
+  description: string;
+  recentChanges: string;
+  mediumTermChanges: string;
+  longTermChanges: string;
+}
+
+function extractNodeSummarySection(text: string, start: RegExp, end?: RegExp): string {
+  const startMatch = start.exec(text);
+  if (!startMatch || startMatch.index === undefined) return '';
+  const tail = text.slice(startMatch.index + startMatch[0].length);
+  if (!end) return tail.trim();
+  const endMatch = end.exec(tail);
+  return (endMatch && endMatch.index !== undefined ? tail.slice(0, endMatch.index) : tail).trim();
+}
+
+function parseWorldNodeSummary(summary: string): ParsedWorldNodeSummary {
+  const text = summary.replace(/\r\n/g, '\n').trim();
+  const description = extractNodeSummarySection(
+    text,
+    /^(?:#+\s*)?Description\s*:?\s*$/im,
+    /^(?:#+\s*)?(Changes|Recent Changes|Medium[- ]Term Changes|Long[- ]Term Changes)\s*:?\s*$/im
+  );
+
+  if (!description) {
+    return {
+      description: text,
+      recentChanges: '',
+      mediumTermChanges: '',
+      longTermChanges: '',
+    };
+  }
+
+  return {
+    description,
+    recentChanges: extractNodeSummarySection(
+      text,
+      /^(?:#+\s*)?Recent Changes\s*:?\s*$/im,
+      /^(?:#+\s*)?(Medium[- ]Term Changes|Long[- ]Term Changes)\s*:?\s*$/im
+    ),
+    mediumTermChanges: extractNodeSummarySection(
+      text,
+      /^(?:#+\s*)?Medium[- ]Term Changes\s*:?\s*$/im,
+      /^(?:#+\s*)?Long[- ]Term Changes\s*:?\s*$/im
+    ),
+    longTermChanges: extractNodeSummarySection(text, /^(?:#+\s*)?Long[- ]Term Changes\s*:?\s*$/im),
+  };
+}
+
+function CompactNodeSummary({ summary }: { summary: string }) {
+  const detail = parseWorldNodeSummary(summary);
+  return <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">{detail.description || summary}</p>;
+}
+
+function WorldNodeDetailBlocks({ summary }: { summary: string }) {
+  const detail = parseWorldNodeSummary(summary);
+  const changeBlocks = [
+    { label: 'Recent Changes', value: detail.recentChanges },
+    { label: 'Medium-Term Changes', value: detail.mediumTermChanges },
+    { label: 'Long-Term Changes', value: detail.longTermChanges },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-lg bg-gray-50 p-3">
+        <h4 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Description</h4>
+        <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-600">
+          {detail.description || 'No durable description recorded yet.'}
+        </p>
+      </div>
+      <div className="rounded-lg border border-gray-100 p-3">
+        <h4 className="text-[11px] font-semibold uppercase tracking-wider text-gray-400">Changes</h4>
+        <div className="mt-2 space-y-2">
+          {changeBlocks.map((block) => (
+            <div key={block.label}>
+              <div className="text-xs font-medium text-gray-900">{block.label}</div>
+              <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-600">
+                {block.value || 'None recorded.'}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 interface WorldEdge {
@@ -187,6 +275,12 @@ interface WorldStateResponse {
       maxEventsPerNode?: number;
       nodeAgentConcurrency?: number;
       storeUnaffectedDecisions?: boolean;
+      retrievalStrategy?: 'hybrid' | 'weighted' | 'node_picker';
+      maxContextNodes?: number;
+      maxNeighborsPerNode?: number;
+      maxCandidateNeighbors?: number;
+      connectionDisplayThreshold?: number;
+      propagationRandomMode?: 'seeded' | 'random' | 'threshold';
     };
     players: AdminPlayer[];
   };
@@ -211,6 +305,7 @@ interface AiDraft {
   stylePrompt: string;
   creativity: string;
   submitEverySeconds: string;
+  helperActivity: string;
   provider: AiProvider;
   model: string;
 }
@@ -222,6 +317,18 @@ const MODULE_LLM_LABELS: Array<{ key: ModuleLlmName; label: string }> = [
   { key: 'world', label: 'World Graph' },
   { key: 'summary', label: 'Summaries' },
   { key: 'helper', label: 'World Helper' },
+];
+
+const RETRIEVAL_STRATEGY_OPTIONS = [
+  { label: 'Hybrid', value: 'hybrid' },
+  { label: 'Weighted', value: 'weighted' },
+  { label: 'Node picker', value: 'node_picker' },
+];
+
+const PROPAGATION_RANDOM_OPTIONS = [
+  { label: 'Seeded', value: 'seeded' },
+  { label: 'Random', value: 'random' },
+  { label: 'Threshold', value: 'threshold' },
 ];
 
 interface LlmDraft {
@@ -243,6 +350,12 @@ interface ConfigDraft {
   maxEventsPerNode: string;
   nodeAgentConcurrency: string;
   storeUnaffectedDecisions: boolean;
+  retrievalStrategy: 'hybrid' | 'weighted' | 'node_picker';
+  maxContextNodes: string;
+  maxNeighborsPerNode: string;
+  maxCandidateNeighbors: string;
+  connectionDisplayThreshold: string;
+  propagationRandomMode: 'seeded' | 'random' | 'threshold';
   roundSummaries: boolean;
   finalNarrative: boolean;
   provider: AiProvider;
@@ -254,6 +367,14 @@ interface ConfigDraft {
 
 function normalizeProvider(value: unknown): AiProvider {
   return value === 'openai' ? 'openai' : 'deepseek';
+}
+
+function normalizeRetrievalStrategy(value: unknown): ConfigDraft['retrievalStrategy'] {
+  return value === 'weighted' || value === 'node_picker' || value === 'hybrid' ? value : 'hybrid';
+}
+
+function normalizePropagationRandomMode(value: unknown): ConfigDraft['propagationRandomMode'] {
+  return value === 'random' || value === 'threshold' || value === 'seeded' ? value : 'seeded';
 }
 
 function draftLlmConfig(raw: unknown, fallback?: LlmDraft): LlmDraft {
@@ -287,6 +408,7 @@ function draftFromState(state: WorldStateResponse): ConfigDraft {
       stylePrompt: player.aiConfig?.stylePrompt ?? '',
       creativity: String(player.aiConfig?.creativity ?? 1),
       submitEverySeconds: String(player.aiConfig?.submitEverySeconds ?? 0),
+      helperActivity: String(player.aiConfig?.helperActivity ?? 0.5),
       provider: playerProvider,
       model: player.aiConfig?.model ?? defaultModelForProvider(playerProvider),
     };
@@ -305,6 +427,12 @@ function draftFromState(state: WorldStateResponse): ConfigDraft {
     maxEventsPerNode: String(worldStateConfig.maxEventsPerNode ?? 2),
     nodeAgentConcurrency: String(worldStateConfig.nodeAgentConcurrency ?? 4),
     storeUnaffectedDecisions: worldStateConfig.storeUnaffectedDecisions !== false,
+    retrievalStrategy: normalizeRetrievalStrategy(worldStateConfig.retrievalStrategy),
+    maxContextNodes: String(worldStateConfig.maxContextNodes ?? 16),
+    maxNeighborsPerNode: String(worldStateConfig.maxNeighborsPerNode ?? 8),
+    maxCandidateNeighbors: String(worldStateConfig.maxCandidateNeighbors ?? 12),
+    connectionDisplayThreshold: String(worldStateConfig.connectionDisplayThreshold ?? 0.15),
+    propagationRandomMode: normalizePropagationRandomMode(worldStateConfig.propagationRandomMode),
     roundSummaries: state.session.summaryConfig?.roundSummaries !== false,
     finalNarrative: state.session.summaryConfig?.finalNarrative !== false,
     provider,
@@ -445,7 +573,7 @@ function WorldGraphNode({ data, selected }: NodeProps<WorldGraphFlowNode>) {
         </div>
         <Badge variant={node.timesUpdated > 2 ? 'purple' : 'default'}>{node.timesUpdated}</Badge>
       </div>
-      <p className="mt-2 line-clamp-3 text-xs leading-5 text-gray-500">{node.summary}</p>
+      <CompactNodeSummary summary={node.summary} />
     </div>
   );
 }
@@ -925,7 +1053,7 @@ function GraphCanvas({
                 </Badge>
               </div>
             </div>
-            <p className="text-sm leading-6 text-gray-600">{selectedNode.summary}</p>
+            <WorldNodeDetailBlocks summary={selectedNode.summary} />
             <div>
               <h4 className="text-xs font-semibold uppercase tracking-wider text-gray-400">Connected edges</h4>
               <div className="mt-2 space-y-2">
@@ -1412,6 +1540,12 @@ export function AdminPage() {
             maxEventsPerNode: Number(configDraft.maxEventsPerNode),
             nodeAgentConcurrency: Number(configDraft.nodeAgentConcurrency),
             storeUnaffectedDecisions: configDraft.storeUnaffectedDecisions,
+            retrievalStrategy: configDraft.retrievalStrategy,
+            maxContextNodes: Number(configDraft.maxContextNodes),
+            maxNeighborsPerNode: Number(configDraft.maxNeighborsPerNode),
+            maxCandidateNeighbors: Number(configDraft.maxCandidateNeighbors),
+            connectionDisplayThreshold: Number(configDraft.connectionDisplayThreshold),
+            propagationRandomMode: configDraft.propagationRandomMode,
           },
           llmConfig: {
             provider: configDraft.provider,
@@ -1435,6 +1569,7 @@ export function AdminPage() {
               stylePrompt: draft.stylePrompt,
               creativity: Number(draft.creativity),
               submitEverySeconds: Number(draft.submitEverySeconds),
+              helperActivity: Number(draft.helperActivity),
               provider: draft.provider,
               model: draft.model,
             },
@@ -1953,6 +2088,60 @@ export function AdminPage() {
                             className="h-4 w-4"
                           />
                         </label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <label className="text-xs text-gray-500">
+                            Retrieval
+                            <DropdownSelect
+                              value={configDraft.retrievalStrategy}
+                              options={RETRIEVAL_STRATEGY_OPTIONS}
+                              onChange={(value) => patchDraft({ retrievalStrategy: normalizeRetrievalStrategy(value) })}
+                              ariaLabel="Admin world retrieval strategy"
+                              size="sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Random mode
+                            <DropdownSelect
+                              value={configDraft.propagationRandomMode}
+                              options={PROPAGATION_RANDOM_OPTIONS}
+                              onChange={(value) => patchDraft({ propagationRandomMode: normalizePropagationRandomMode(value) })}
+                              ariaLabel="Admin propagation random mode"
+                              size="sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Context nodes
+                            <input
+                              value={configDraft.maxContextNodes}
+                              onChange={(event) => patchDraft({ maxContextNodes: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Neighbors/node
+                            <input
+                              value={configDraft.maxNeighborsPerNode}
+                              onChange={(event) => patchDraft({ maxNeighborsPerNode: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Candidate neighbors
+                            <input
+                              value={configDraft.maxCandidateNeighbors}
+                              onChange={(event) => patchDraft({ maxCandidateNeighbors: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                          <label className="text-xs text-gray-500">
+                            Display threshold
+                            <input
+                              value={configDraft.connectionDisplayThreshold}
+                              onChange={(event) => patchDraft({ connectionDisplayThreshold: event.target.value })}
+                              className="mt-1 w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                            />
+                          </label>
+                        </div>
                       </div>
 
                       <div className="space-y-2 rounded-lg border border-gray-100 p-3">
@@ -2090,7 +2279,7 @@ export function AdminPage() {
                                 size="sm"
                               />
                             </div>
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-3 gap-2">
                               <input
                                 value={draft.creativity}
                                 onChange={(event) => patchAiDraft(playerId, { creativity: event.target.value })}
@@ -2102,6 +2291,12 @@ export function AdminPage() {
                                 onChange={(event) => patchAiDraft(playerId, { submitEverySeconds: event.target.value })}
                                 className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
                                 title="Extra delay seconds"
+                              />
+                              <input
+                                value={draft.helperActivity}
+                                onChange={(event) => patchAiDraft(playerId, { helperActivity: event.target.value })}
+                                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-sm"
+                                title="World Helper activity"
                               />
                             </div>
                           </div>
@@ -2171,7 +2366,7 @@ export function AdminPage() {
                             </div>
                             <Badge variant={node.timesUpdated > 2 ? 'purple' : 'default'}>{node.timesUpdated}</Badge>
                           </div>
-                          <p className="mt-2 text-sm leading-6 text-gray-600">{node.summary}</p>
+                          <WorldNodeDetailBlocks summary={node.summary} />
                         </div>
                       ))}
                     </div>

@@ -31,7 +31,7 @@ export interface JsonModelClient {
   callResponsesApi<T>(request: ResponsesApiRequest): Promise<ResponsesApiResult<T>>;
 }
 
-export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-pro';
+export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash';
 export const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
 
 function buildDeepSeekUserInput(input: string, jsonSchema?: JsonSchemaDefinition): string {
@@ -52,7 +52,7 @@ ${JSON.stringify(jsonSchema.schema)}`;
 function createDeepSeekJsonClient(config: JsonModelClientConfig): JsonModelClient {
   const {
     apiKey,
-    model,
+    model = DEFAULT_DEEPSEEK_MODEL,
     baseUrl = DEFAULT_DEEPSEEK_BASE_URL,
     fetchFn,
   } = config;
@@ -143,7 +143,7 @@ function createDeepSeekJsonClient(config: JsonModelClientConfig): JsonModelClien
 
 export function createJsonModelClient(config: JsonModelClientConfig): JsonModelClient {
   if (config.provider === 'deepseek') {
-    return createDeepSeekJsonClient(config);
+    return createDeepSeekJsonClient({ ...config, model: DEFAULT_DEEPSEEK_MODEL });
   }
 
   return createOpenAIClient({
@@ -160,7 +160,7 @@ export function getDefaultJsonProvider(): JsonModelProvider {
 
 export function defaultModelForProvider(provider: JsonModelProvider): string {
   return provider === 'deepseek'
-    ? (process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL)
+    ? DEFAULT_DEEPSEEK_MODEL
     : (process.env.OPENAI_MODEL || DEFAULT_OPENAI_MODEL);
 }
 
@@ -176,9 +176,10 @@ export function normalizeJsonModelSelection(raw: unknown): JsonModelSelection {
     ? source.provider
     : getDefaultJsonProvider();
 
-  const model = typeof source.model === 'string' && source.model.trim()
+  const requestedModel = typeof source.model === 'string' && source.model.trim()
     ? source.model.trim().slice(0, 100)
     : defaultModelForProvider(provider);
+  const model = provider === 'deepseek' ? DEFAULT_DEEPSEEK_MODEL : requestedModel;
 
   const baseUrl = typeof source.baseUrl === 'string' && source.baseUrl.trim()
     ? source.baseUrl.trim().replace(/\/+$/, '').slice(0, 200)
@@ -195,7 +196,7 @@ export function getJsonProviderConfig(prefix = 'LLM', override?: Partial<JsonMod
     return {
       provider,
       apiKey: process.env[`${prefix}_DEEPSEEK_API_KEY`] || process.env.DEEPSEEK_API_KEY || '',
-      model: override?.model || process.env[`${prefix}_DEEPSEEK_MODEL`] || selection.model,
+      model: DEFAULT_DEEPSEEK_MODEL,
       baseUrl: override?.baseUrl || process.env[`${prefix}_DEEPSEEK_BASE_URL`] || selection.baseUrl || DEFAULT_DEEPSEEK_BASE_URL,
     };
   }

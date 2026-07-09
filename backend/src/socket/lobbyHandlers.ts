@@ -4,7 +4,7 @@ import { joinCodeSchema, submitHeadlineSchema, worldHelperAskSchema } from '../u
 import { ZodError } from 'zod';
 import { transformHeadline, LinkedHeadline } from '../game/headlineTransformationService.js';
 import { getDefaultPlanets } from '../game/planets.js';
-import { HeadlineEntry } from '../llm/jurorPrompt.js';
+import { HeadlineEntry } from '../prompts/jurorPrompt.js';
 import { applyHeadlineEvaluation, getPlayerScoreBreakdowns } from '../game/scoringService.js';
 import { PlausibilityLevel, DEFAULT_PLANETS, PlanetPanelEntry } from '../game/scoringTypes.js';
 import {
@@ -27,6 +27,8 @@ import {
   askWorldHelper,
   getWorldHelperHistory,
 } from '../world/worldHelperService.js';
+import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
+import { normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
 
 export { clearSessionRateLimits };
 
@@ -126,6 +128,7 @@ interface SessionState {
       stylePrompt?: string;
       creativity?: number;
       submitEverySeconds?: number;
+      helperActivity?: number;
       provider?: 'openai' | 'deepseek';
       model?: string;
     };
@@ -242,8 +245,8 @@ async function getSessionState(joinCode: string): Promise<SessionState | null> {
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,
-      llmConfig: session.llm_config,
-      moduleLlmConfig: session.module_llm_config ?? {},
+      llmConfig: normalizeJsonModelSelection(session.llm_config),
+      moduleLlmConfig: normalizeModuleLlmConfig(session.module_llm_config),
       worldStateConfig: session.world_state_config ?? {},
       summaryConfig: session.summary_config ?? {},
       phase: session.phase,

@@ -20,7 +20,7 @@ import {
   JurorEvaluationOutput,
   PlausibilityBand,
   BAND_LABELS,
-} from '../llm/jurorPrompt.js';
+} from '../prompts/jurorPrompt.js';
 
 export interface JurorEvaluationRequest extends JurorPromptInput {
   // inherits storyDirection, headlinesList, planetList
@@ -205,4 +205,4 @@ export async function evaluateJuror(
 }
 
 // re-export types for convenience
-export type { JurorEvaluationOutput } from '../llm/jurorPrompt.js';
+export type { JurorEvaluationOutput } from '../prompts/jurorPrompt.js';

@@ -7,7 +7,6 @@ export interface ModelOption {
 
 export const MODEL_OPTIONS: Record<AiProvider, ModelOption[]> = {
   deepseek: [
-    { label: 'DeepSeek V4 Pro', value: 'deepseek-v4-pro' },
     { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash' },
   ],
   openai: [
@@ -39,6 +38,9 @@ export function modelOptionsForProvider(provider: AiProvider): ModelOption[] {
 
 export function modelOptionsForValue(provider: AiProvider, value: string): ModelOption[] {
   const options = modelOptionsForProvider(provider);
+  if (provider === 'deepseek') {
+    return options;
+  }
   if (!value || options.some((option) => option.value === value)) {
     return options;
   }

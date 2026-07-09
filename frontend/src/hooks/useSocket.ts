@@ -26,6 +26,7 @@ export interface Player {
     stylePrompt?: string;
     creativity?: number;
     submitEverySeconds?: number;
+    helperActivity?: number;
     provider?: 'openai' | 'deepseek';
     model?: string;
   };

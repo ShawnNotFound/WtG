@@ -6,8 +6,8 @@
  * from different characters living through the 20-year span.
  */
 
-import { JsonSchemaDefinition } from './openaiResponsesClient.js';
-import { NarrativePromptInput } from './summaryTypes.js';
+import { JsonSchemaDefinition } from '../llm/openaiResponsesClient.js';
+import { NarrativePromptInput } from '../llm/summaryTypes.js';
 
 export const narrativeJsonSchema: JsonSchemaDefinition = {
   name: 'narrative_summary',

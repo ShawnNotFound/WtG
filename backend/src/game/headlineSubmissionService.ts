@@ -2,7 +2,7 @@ import { Server } from 'socket.io';
 import pool from '../db/pool.js';
 import { transformHeadline, LinkedHeadline } from './headlineTransformationService.js';
 import { getDefaultPlanets } from './planets.js';
-import { HeadlineEntry } from '../llm/jurorPrompt.js';
+import { HeadlineEntry } from '../prompts/jurorPrompt.js';
 import { applyHeadlineEvaluation, getPlayerScoreBreakdowns } from './scoringService.js';
 import { PlausibilityLevel } from './scoringTypes.js';
 import { SEED_HEADLINES } from './seedHeadlines.js';

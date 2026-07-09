@@ -19,12 +19,12 @@ import {
   buildSummaryPrompt,
   buildSummaryInstructions,
   summaryJsonSchema,
-} from '../llm/summaryPrompt.js';
+} from '../prompts/summaryPrompt.js';
 import {
   buildNarrativePrompt,
   buildNarrativeInstructions,
   narrativeJsonSchema,
-} from '../llm/narrativePrompt.js';
+} from '../prompts/narrativePrompt.js';
 import {
   GenerateSummaryParams,
   GenerateNarrativeParams,

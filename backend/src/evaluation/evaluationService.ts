@@ -7,7 +7,7 @@ import { randomOrdinals } from '../game/planetUsage.js';
 import { DEFAULT_PLANETS } from '../game/scoringTypes.js';
 import { generateUniqueJoinCode } from '../utils/joinCode.js';
 import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
-import { buildGameplayJudgePrompt } from './gameplayJudgePrompt.js';
+import { buildGameplayJudgePrompt } from '../prompts/gameplayJudgePrompt.js';
 
 const MONITOR_INTERVAL_MS = 2_500;
 
@@ -16,6 +16,7 @@ export interface EvaluationAiPlayerConfig {
   stylePrompt?: string;
   creativity?: number;
   submitEverySeconds?: number;
+  helperActivity?: number;
   provider?: 'openai' | 'deepseek';
   model?: string;
 }
@@ -281,6 +282,7 @@ async function createEvaluationSession(
       stylePrompt: aiPlayer.stylePrompt ?? DEFAULT_AI_PLAYER_CONFIG.stylePrompt,
       creativity: aiPlayer.creativity ?? DEFAULT_AI_PLAYER_CONFIG.creativity,
       submitEverySeconds: aiPlayer.submitEverySeconds ?? DEFAULT_AI_PLAYER_CONFIG.submitEverySeconds,
+      helperActivity: aiPlayer.helperActivity ?? DEFAULT_AI_PLAYER_CONFIG.helperActivity,
       provider: aiPlayer.provider ?? DEFAULT_AI_PLAYER_CONFIG.provider,
       model: aiPlayer.model,
     });

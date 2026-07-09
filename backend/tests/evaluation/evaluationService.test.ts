@@ -1,5 +1,5 @@
 import { parseJudgeResult } from '../../src/evaluation/evaluationService';
-import { buildGameplayJudgePrompt } from '../../src/evaluation/gameplayJudgePrompt';
+import { buildGameplayJudgePrompt } from '../../src/prompts/gameplayJudgePrompt';
 
 const validJudgeJson = {
   overall_score: 82,
@@ -52,4 +52,3 @@ describe('gameplay judge prompt', () => {
     expect(prompt).toContain('"dimension_scores"');
   });
 });
-

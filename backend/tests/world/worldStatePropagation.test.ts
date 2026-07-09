@@ -2,6 +2,8 @@ import {
   DEFAULT_WORLD_STATE_CONFIG,
   normalizeWorldStateConfig,
   PropagationLimiter,
+  seededProbability,
+  shouldPropagateByConnection,
 } from '../../src/world/worldStateService';
 import {
   buildEntityReactionPrompt,
@@ -9,7 +11,7 @@ import {
   buildWorldStateInstructions,
   entityReactionJsonSchema,
   headlineWorldStateIntakeJsonSchema,
-} from '../../src/world/worldStatePrompt';
+} from '../../src/prompts/worldStatePrompt';
 
 describe('world-state propagation config', () => {
   it('defaults to cyclic graph propagation with bounded reactions', () => {
@@ -23,12 +25,22 @@ describe('world-state propagation config', () => {
       maxNodeReactions: 999,
       maxEventsPerNode: 0,
       nodeAgentConcurrency: -1,
+      retrievalStrategy: 'unknown',
+      maxContextNodes: 999,
+      maxNeighborsPerNode: 99,
+      maxCandidateNeighbors: 999,
+      connectionDisplayThreshold: 5,
+      propagationRandomMode: 'unknown',
     })).toEqual({
       ...DEFAULT_WORLD_STATE_CONFIG,
       maxPropagationDepth: 8,
       maxNodeReactions: 200,
       maxEventsPerNode: 1,
       nodeAgentConcurrency: 1,
+      maxContextNodes: 64,
+      maxNeighborsPerNode: 32,
+      maxCandidateNeighbors: 64,
+      connectionDisplayThreshold: 1,
     });
   });
 });
@@ -81,13 +93,34 @@ describe('PropagationLimiter', () => {
   });
 });
 
+describe('seededProbability', () => {
+  it('is deterministic and bounded', () => {
+    const first = seededProbability('session:job:event:A:B:1');
+    const second = seededProbability('session:job:event:A:B:1');
+
+    expect(first).toBe(second);
+    expect(first).toBeGreaterThanOrEqual(0);
+    expect(first).toBeLessThan(1);
+  });
+
+  it('uses connection strength as the propagation probability bounds', () => {
+    expect(shouldPropagateByConnection(0, DEFAULT_WORLD_STATE_CONFIG, 'seed')).toBe(false);
+    expect(shouldPropagateByConnection(1, DEFAULT_WORLD_STATE_CONFIG, 'seed')).toBe(true);
+    expect(shouldPropagateByConnection(0.5, {
+      ...DEFAULT_WORLD_STATE_CONFIG,
+      propagationRandomMode: 'threshold',
+    }, 'seed')).toBe(true);
+  });
+});
+
 describe('world-state prompts and schemas', () => {
-  it('uses world graph terminology and allows cycles while rejecting self-edges', () => {
+  it('uses world graph terminology and allows cycles while rejecting self-connections', () => {
     const instructions = buildWorldStateInstructions();
 
     expect(instructions).toContain('directed cyclic world graph');
     expect(instructions).toContain('Directed cycles are allowed');
-    expect(instructions).toContain('Self-edges are not useful');
+    expect(instructions).toContain('Self-connections are not useful');
+    expect(instructions).toContain('Connection strength is a directed 0 to 1 value');
     expect(instructions).not.toContain('directed acyclic graph');
   });
 
@@ -98,12 +131,16 @@ describe('world-state prompts and schemas', () => {
       playerNickname: 'tester',
       roundNo: 1,
       inGameSubmittedAt: null,
-      nodes: [
-        { name: 'OpenAI', type: 'company', summary: 'Builds frontier models.', timesUpdated: 1 },
-        { name: 'EU regulators', type: 'government', summary: 'Regulates AI deployments.', timesUpdated: 1 },
+      nodeCatalog: [
+        { id: 'node-openai', name: 'OpenAI', type: 'company', timesUpdated: 1 },
+        { id: 'node-eu', name: 'EU regulators', type: 'government', timesUpdated: 1 },
       ],
-      edges: [
-        { source: 'EU regulators', target: 'OpenAI', relationType: 'REGULATES', summary: 'Sets compliance rules.' },
+      contextNodes: [
+        { id: 'node-openai', name: 'OpenAI', type: 'company', summary: 'Builds frontier models.', timesUpdated: 1 },
+        { id: 'node-eu', name: 'EU regulators', type: 'government', summary: 'Regulates AI deployments.', timesUpdated: 1 },
+      ],
+      contextConnections: [
+        { source: 'EU regulators', target: 'OpenAI', strength: 0.9, rationale: 'Sets compliance rules.' },
       ],
     });
     const reactionPrompt = buildEntityReactionPrompt({
@@ -127,8 +164,8 @@ describe('world-state prompts and schemas', () => {
           summary: 'Regulates AI deployments.',
           timesUpdated: 1,
           direction: 'incoming',
-          relationType: 'REGULATES',
-          relationSummary: 'Sets compliance rules.',
+          connectionStrength: 0.9,
+          connectionRationale: 'Sets compliance rules.',
         },
       ],
       maxPropagationDepth: 2,
@@ -139,5 +176,7 @@ describe('world-state prompts and schemas', () => {
     expect(reactionPrompt).toContain('cannot force this receiving entity to change');
     expect(headlineWorldStateIntakeJsonSchema.name).toBe('headline_world_state_intake');
     expect(entityReactionJsonSchema.name).toBe('entity_reaction');
+    expect(headlineWorldStateIntakeJsonSchema.schema.required).toContain('connectionUpdates');
+    expect(entityReactionJsonSchema.schema.required).toContain('connectionUpdates');
   });
 });

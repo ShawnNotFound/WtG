@@ -8,7 +8,7 @@ import {
   selectHeadline,
   rollAndSelectHeadline,
 } from '../../src/game/diceRoll';
-import { HeadlineBands } from '../../src/llm/jurorPrompt';
+import { HeadlineBands } from '../../src/prompts/jurorPrompt';
 
 describe('Dice Roll Functions', () => {
   describe('mapRollToBand', () => {

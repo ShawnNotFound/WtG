@@ -6,7 +6,7 @@ import express from 'express';
 import request from 'supertest';
 import jurorRouter from '../../src/routes/juror';
 import * as jurorService from '../../src/game/jurorService';
-import { JurorEvaluationOutput } from '../../src/llm/jurorPrompt';
+import { JurorEvaluationOutput } from '../../src/prompts/jurorPrompt';
 import { OpenAIError } from '../../src/llm/openaiResponsesClient';
 
 // Mock the juror service

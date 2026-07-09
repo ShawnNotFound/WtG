@@ -105,7 +105,7 @@ export function WorldHelperDrawer({
       <div ref={bodyRef} className="flex-1 min-h-0 space-y-4 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
           <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
-            Ask about the timeline, planet strategy, score context, or the hidden world graph.
+            Ask about the timeline, planet rules, score context, or the hidden world graph.
           </div>
         )}
 

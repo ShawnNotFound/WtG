@@ -12,6 +12,8 @@ import { generateRoundSummary, generateFinalNarrativeSummary } from './summarySe
 import { getPlayerScoreBreakdowns } from './scoringService.js';
 import { SEED_HEADLINES } from './seedHeadlines.js';
 import { aiPlayerManager } from '../ai/aiPlayerManager.js';
+import { normalizeJsonModelSelection } from '../llm/jsonModelClient.js';
+import { normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
 
 /**
  * test mode: when GAME_TEST_MODE=true, all time-based durations
@@ -485,8 +487,8 @@ class GameLoopInstance {
       joinCode: session.join_code,
       status: session.status,
       hostPlayerId: session.host_player_id,
-      llmConfig: session.llm_config,
-      moduleLlmConfig: session.module_llm_config ?? {},
+      llmConfig: normalizeJsonModelSelection(session.llm_config),
+      moduleLlmConfig: normalizeModuleLlmConfig(session.module_llm_config),
       worldStateConfig: session.world_state_config ?? {},
       summaryConfig: session.summary_config ?? {},
       phase: session.phase,
