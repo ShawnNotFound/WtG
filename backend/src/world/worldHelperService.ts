@@ -19,13 +19,19 @@ import {
   worldHelperAnswerJsonSchema,
 } from '../prompts/worldHelperPrompt.js';
 import { loadWorldStateContextForQuery } from './worldStateService.js';
+import {
+  updateWorldModelWithHelper,
+  WorldModelUpdateResult,
+} from './worldModelOperationService.js';
 
-interface AskWorldHelperParams {
+export interface AskWorldHelperParams {
   sessionId: string;
   joinCode: string;
   playerId: string;
   question: string;
   clientRequestId?: string;
+  /** AI players use the helper for broad briefings and must not mutate the shared model. */
+  allowWorldMutation?: boolean;
 }
 
 interface HelperCallbacks {
@@ -70,6 +76,7 @@ export interface WorldHelperMessage {
   error: string | null;
   createdAt: string;
   completedAt: string | null;
+  worldUpdate: WorldModelUpdateResult | null;
 }
 
 function cleanString(value: unknown, fallback = '', maxLength = 2000): string {
@@ -131,6 +138,9 @@ function rowToMessage(row: any): WorldHelperMessage {
     error: row.error ?? null,
     createdAt: new Date(row.created_at).toISOString(),
     completedAt: row.completed_at ? new Date(row.completed_at).toISOString() : null,
+    worldUpdate: row.world_update && Object.keys(row.world_update).length > 0
+      ? row.world_update
+      : null,
   };
 }
 
@@ -180,6 +190,30 @@ export function isWorldHelperPlayAdviceRequest(question: string): boolean {
     /\b(maximize score|score more|max points|most points|win the game|beat everyone|highest score|high score)\b/.test(text);
 
   return generatedOutputRequest || moveRecommendationRequest || strategyRequest;
+}
+
+export async function prepareWorldModelForHelperQuestion(
+  params: AskWorldHelperParams,
+  helperMessageId: string
+): Promise<WorldModelUpdateResult | null> {
+  if (params.allowWorldMutation === false || isWorldHelperPlayAdviceRequest(params.question)) {
+    return null;
+  }
+  try {
+    return await updateWorldModelWithHelper({
+      sessionId: params.sessionId,
+      query: params.question,
+      operation: 'ANSWER',
+      helperMessageId,
+      source: 'helper',
+    });
+  } catch (error) {
+    console.warn(
+      `[WorldHelper ${params.joinCode}] World-model preparation failed; answering from existing context:`,
+      error
+    );
+    return null;
+  }
 }
 
 export function buildWorldHelperPolicyBoundaryAnswer(context: WorldHelperPromptContext): WorldHelperAnswer {
@@ -513,6 +547,14 @@ export async function askWorldHelper(
   const messageId = insertResult.rows[0].id;
 
   try {
+    const isPolicyBoundary = isWorldHelperPlayAdviceRequest(params.question);
+    if (!isPolicyBoundary && params.allowWorldMutation !== false) {
+      // Gap filling is deliberately best-effort. The operation service records
+      // its own durable error/job metadata; an unavailable world editor should
+      // not prevent a player from receiving an answer from existing context.
+      await prepareWorldModelForHelperQuestion(params, messageId);
+    }
+
     const context = await buildHelperContext(
       params.sessionId,
       params.joinCode,
@@ -520,7 +562,7 @@ export async function askWorldHelper(
       params.question
     );
 
-    if (isWorldHelperPlayAdviceRequest(params.question)) {
+    if (isPolicyBoundary) {
       const answer = buildWorldHelperPolicyBoundaryAnswer(context);
 
       await pool.query(

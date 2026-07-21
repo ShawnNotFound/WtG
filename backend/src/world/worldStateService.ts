@@ -8,6 +8,8 @@ import {
 } from '../llm/jsonModelClient.js';
 import { getSessionLlmSelection, normalizeModuleLlmConfig } from '../llm/sessionLlmConfig.js';
 import { mergeWorldNodeSummary, normalizeWorldNodeSummary } from './worldNodeDetail.js';
+import { lockWorldModelSession } from './worldMutationLock.js';
+import { computeChangeVelocity, computeTextChangeMagnitude } from './worldPagePriority.js';
 import { SEED_HEADLINES } from '../game/seedHeadlines.js';
 import {
   buildEntityReactionPrompt,
@@ -30,7 +32,7 @@ import {
   WorldNodeDraft,
 } from '../prompts/worldStatePrompt.js';
 
-type WorldStateJobKind = 'initial' | 'headline' | 'manual';
+type WorldStateJobKind = 'initial' | 'headline' | 'manual' | 'helper';
 type WorldStateJobStatus = 'queued' | 'running' | 'completed' | 'error';
 type ReactionStatus = 'affected' | 'unaffected' | 'skipped' | 'error';
 
@@ -217,6 +219,21 @@ function cleanName(value: unknown): string {
 
 function cleanType(value: unknown): string {
   return cleanText(value, 'entity', 80).toLowerCase();
+}
+
+/**
+ * Canonical lookup key shared by headline-ingestion name and alias matching.
+ * Keep this equivalent to the future-Wikipedia editor's page-name
+ * normalization so punctuation, spacing, case, and compatibility-width
+ * variants do not create duplicate pages.
+ */
+export function normalizeWorldNodeLookupName(value: string): string {
+  return cleanText(value, '', 160)
+    .normalize('NFKC')
+    .toLocaleLowerCase('en-US')
+    .replace(/[^a-z0-9\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function cleanEventId(value: unknown, fallback: string): string {
@@ -770,7 +787,47 @@ async function updateJob(
   );
 }
 
-async function upsertNode(
+async function saveWorldNodeAliases(
+  client: PoolClient,
+  sessionId: string,
+  nodeId: string,
+  canonicalName: string,
+  aliases: string[]
+): Promise<string[]> {
+  const candidates = [canonicalName, ...aliases];
+  const seen = new Set<string>();
+
+  for (const candidate of candidates) {
+    const alias = cleanName(candidate);
+    const normalizedAlias = normalizeWorldNodeLookupName(alias);
+    if (!normalizedAlias || seen.has(normalizedAlias)) continue;
+    seen.add(normalizedAlias);
+
+    await client.query(
+      `INSERT INTO world_state_node_aliases (session_id, node_id, alias, normalized_alias)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (session_id, normalized_alias) DO NOTHING`,
+      [sessionId, nodeId, alias, normalizedAlias]
+    );
+  }
+
+  const result = await client.query(
+    `UPDATE world_state_nodes node
+     SET aliases = COALESCE((
+       SELECT jsonb_agg(alias.alias ORDER BY alias.alias)
+       FROM world_state_node_aliases alias
+       WHERE alias.node_id = node.id
+         AND alias.normalized_alias <> $2
+     ), '[]'::jsonb)
+     WHERE node.id = $1
+     RETURNING aliases`,
+    [nodeId, normalizeWorldNodeLookupName(canonicalName)]
+  );
+
+  return Array.isArray(result.rows[0]?.aliases) ? result.rows[0].aliases : [];
+}
+
+export async function upsertNode(
   client: PoolClient,
   sessionId: string,
   draft: Pick<WorldNodeDraft, 'name' | 'type' | 'summary' | 'attributes'>,
@@ -778,24 +835,71 @@ async function upsertNode(
   increment: number
 ): Promise<{ id: string; name: string; type: string; summary: string; created: boolean }> {
   const name = cleanName(draft.name);
+  const normalizedName = normalizeWorldNodeLookupName(name);
   const type = cleanType(draft.type);
   const rawSummary = cleanText(draft.summary, '', 5000);
   const attributes = attributesToRecord(draft.attributes);
 
   const existing = await client.query(
-    `SELECT id, attributes, summary
-     FROM world_state_nodes
-     WHERE session_id = $1 AND lower(name) = lower($2)
-     FOR UPDATE`,
-    [sessionId, name]
+    `SELECT node.id, node.name, node.type, node.attributes, node.aliases,
+            node.summary, node.revision_no,
+            change_velocity, last_content_update_at
+     FROM world_state_nodes node
+     WHERE node.session_id = $1
+       AND (
+         lower(node.name) = lower($2)
+         OR ($3 <> '' AND trim(lower(regexp_replace(trim(node.name), '[^[:alnum:]]+', ' ', 'g'))) = $3)
+         OR ($3 <> '' AND EXISTS (
+           SELECT 1
+           FROM world_state_node_aliases alias
+           WHERE alias.session_id = $1
+             AND alias.node_id = node.id
+             AND alias.normalized_alias = $3
+         ))
+       )
+     ORDER BY CASE
+       WHEN lower(node.name) = lower($2) THEN 0
+       WHEN trim(lower(regexp_replace(trim(node.name), '[^[:alnum:]]+', ' ', 'g'))) = $3 THEN 1
+       ELSE 2
+     END,
+     node.created_at ASC,
+     node.id ASC
+     LIMIT 1
+     FOR UPDATE OF node`,
+    [sessionId, name, normalizedName]
   );
 
   if (existing.rows.length > 0) {
     const row = existing.rows[0];
+    const canonicalName = row.name;
+    const persistedAliases = await saveWorldNodeAliases(
+      client,
+      sessionId,
+      row.id,
+      canonicalName,
+      [name]
+    );
     const mergedAttributes = mergeAttributes(row.attributes, attributes);
     const summary = rawSummary
-      ? mergeWorldNodeSummary(row.summary, rawSummary, name)
-      : normalizeWorldNodeSummary(row.summary, name);
+      ? mergeWorldNodeSummary(row.summary, rawSummary, canonicalName)
+      : normalizeWorldNodeSummary(row.summary, canonicalName);
+    const textChangeMagnitude = computeTextChangeMagnitude(row.summary, summary);
+    const typeChanged = row.type !== type;
+    const attributesChanged = JSON.stringify(row.attributes ?? {}) !== JSON.stringify(mergedAttributes);
+    const aliasesChanged = JSON.stringify(row.aliases ?? []) !== JSON.stringify(persistedAliases);
+    const contentChanged = textChangeMagnitude >= 0.01 || typeChanged || attributesChanged || aliasesChanged;
+    const changeMagnitude = Math.max(
+      textChangeMagnitude,
+      typeChanged || attributesChanged || aliasesChanged ? 0.05 : 0
+    );
+    const nextRevisionNo = Number(row.revision_no ?? 1) + (contentChanged ? 1 : 0);
+    const elapsedDays = Math.max(
+      0,
+      (Date.now() - new Date(row.last_content_update_at).getTime()) / (24 * 60 * 60 * 1000)
+    );
+    const changeVelocity = contentChanged
+      ? computeChangeVelocity(Number(row.change_velocity ?? 0), changeMagnitude, elapsedDays)
+      : Number(row.change_velocity ?? 0);
     await client.query(
       `UPDATE world_state_nodes
        SET name = $1,
@@ -803,19 +907,72 @@ async function upsertNode(
            summary = $3,
            attributes = $4,
            times_updated = times_updated + $5,
-           last_seen_headline_id = COALESCE($6, last_seen_headline_id)
-       WHERE id = $7`,
+           last_seen_headline_id = COALESCE($6, last_seen_headline_id),
+           revision_no = $7,
+           last_content_update_at = CASE WHEN $8 THEN CURRENT_TIMESTAMP ELSE last_content_update_at END,
+           consultations_since_update = CASE WHEN $8 THEN 0 ELSE consultations_since_update END,
+           change_velocity = $9,
+           last_change_magnitude = CASE WHEN $8 THEN $10 ELSE last_change_magnitude END
+       WHERE id = $11`,
       [
-        name,
+        canonicalName,
         type,
         summary,
         JSON.stringify(mergedAttributes),
         increment,
         headlineId,
+        nextRevisionNo,
+        contentChanged,
+        changeVelocity,
+        changeMagnitude,
         row.id,
       ]
     );
-    return { id: row.id, name, type, summary, created: false };
+    if (contentChanged) {
+      await client.query(
+        `INSERT INTO world_state_page_revisions (
+           session_id, node_id, revision_no, operation, source_kind,
+           source_headline_id, effective_at, page_name, page_type,
+           page_attributes, page_aliases, before_summary, after_summary,
+           summary_delta, rationale, evidence, confidence, change_magnitude
+         )
+         VALUES (
+           $1, $2, $3, $4, $5, $6,
+           GREATEST(
+             COALESCE((
+               SELECT COALESCE(in_game_submitted_at, created_at)
+               FROM game_session_headlines WHERE id = $6
+             ), CURRENT_TIMESTAMP),
+             COALESCE((
+               SELECT MAX(effective_at) FROM world_state_page_revisions WHERE node_id = $2
+             ), '-infinity'::timestamptz)
+           ),
+           $7, $8, $9, $10, $11, $12, $13, $14, $15, 1, $16
+         )`,
+        [
+          sessionId,
+          row.id,
+          nextRevisionNo,
+          headlineId ? 'INCORPORATE' : 'UPDATE',
+          headlineId ? 'headline' : 'system',
+          headlineId,
+          canonicalName,
+          type,
+          JSON.stringify(mergedAttributes),
+          JSON.stringify(persistedAliases),
+          row.summary,
+          summary,
+          `Page content changed (magnitude ${changeMagnitude.toFixed(3)}).`,
+          headlineId
+            ? 'Accepted headline incorporated into the current page.'
+            : 'World-state process revised the current page.',
+          JSON.stringify(headlineId ? [{ headlineId }] : []),
+          changeMagnitude,
+        ]
+      );
+      await raiseDependentUpdatePriority(client, sessionId, row.id, changeMagnitude);
+    }
+    return { id: row.id, name: canonicalName, type, summary, created: false };
   }
 
   const summary = normalizeWorldNodeSummary(rawSummary, name);
@@ -824,7 +981,7 @@ async function upsertNode(
     `INSERT INTO world_state_nodes
        (session_id, name, type, summary, attributes, times_updated, first_seen_headline_id, last_seen_headline_id)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-     RETURNING id`,
+     RETURNING id, revision_no`,
     [
       sessionId,
       name,
@@ -837,6 +994,49 @@ async function upsertNode(
   );
 
   const insertedId = inserted.rows[0].id;
+  const persistedAliases = await saveWorldNodeAliases(client, sessionId, insertedId, name, []);
+  const changeMagnitude = computeTextChangeMagnitude('', summary);
+  await client.query(
+    `UPDATE world_state_nodes
+     SET change_velocity = $2,
+         last_change_magnitude = $2
+     WHERE id = $1`,
+    [insertedId, changeMagnitude]
+  );
+  await client.query(
+    `INSERT INTO world_state_page_revisions (
+       session_id, node_id, revision_no, operation, source_kind,
+       source_headline_id, effective_at, page_name, page_type,
+       page_attributes, page_aliases, after_summary, summary_delta, rationale,
+       evidence, confidence, change_magnitude
+     )
+     VALUES (
+       $1, $2, $3, 'CREATE', $4, $5,
+       COALESCE((
+         SELECT COALESCE(in_game_submitted_at, created_at)
+         FROM game_session_headlines WHERE id = $5
+       ), CURRENT_TIMESTAMP),
+       $6, $7, $8, $9, $10, $11, $12, $13, 1, $14
+     )`,
+    [
+      sessionId,
+      insertedId,
+      inserted.rows[0].revision_no,
+      headlineId ? 'headline' : 'seed',
+      headlineId,
+      name,
+      type,
+      JSON.stringify(attributes),
+      JSON.stringify(persistedAliases),
+      summary,
+      `Created the ${name} page.`,
+      headlineId
+        ? 'Concrete page created while incorporating an accepted headline.'
+        : 'Concrete page created while building the initial future encyclopedia.',
+      JSON.stringify(headlineId ? [{ headlineId }] : []),
+      changeMagnitude,
+    ]
+  );
   await ensureDenseConnectionsForNode(client, sessionId, insertedId);
 
   return { id: insertedId, name, type, summary, created: true };
@@ -880,6 +1080,66 @@ async function ensureDenseConnectionsForSession(client: PoolClient, sessionId: s
   );
 }
 
+export async function resolveExistingNodeByName(
+  client: PoolClient,
+  sessionId: string,
+  name: string
+): Promise<{ id: string; name: string } | null> {
+  const cleaned = cleanName(name);
+  const normalizedName = normalizeWorldNodeLookupName(cleaned);
+  const result = await client.query(
+    `SELECT node.id, node.name
+     FROM world_state_nodes node
+     WHERE node.session_id = $1
+       AND (
+         lower(node.name) = lower($2)
+         OR ($3 <> '' AND trim(lower(regexp_replace(trim(node.name), '[^[:alnum:]]+', ' ', 'g'))) = $3)
+         OR ($3 <> '' AND EXISTS (
+           SELECT 1
+           FROM world_state_node_aliases alias
+           WHERE alias.session_id = $1
+             AND alias.node_id = node.id
+             AND alias.normalized_alias = $3
+         ))
+       )
+     ORDER BY CASE
+       WHEN lower(node.name) = lower($2) THEN 0
+       WHEN trim(lower(regexp_replace(trim(node.name), '[^[:alnum:]]+', ' ', 'g'))) = $3 THEN 1
+       ELSE 2
+     END,
+     node.created_at ASC,
+     node.id ASC
+     LIMIT 1
+     FOR UPDATE OF node`,
+    [sessionId, cleaned, normalizedName]
+  );
+  return result.rows[0] ?? null;
+}
+
+async function raiseDependentUpdatePriority(
+  client: PoolClient,
+  sessionId: string,
+  sourceNodeId: string,
+  changeMagnitude: number
+): Promise<void> {
+  await client.query(
+    `UPDATE world_state_nodes target
+     SET update_priority = LEAST(
+       100,
+       GREATEST(
+         target.update_priority,
+         30 * (1 - EXP(-(connection.strength * $3)))
+       )
+     )
+     FROM world_state_connections connection
+     WHERE connection.session_id = $1
+       AND connection.source_node_id = $2
+       AND connection.target_node_id = target.id
+       AND connection.strength > 0`,
+    [sessionId, sourceNodeId, changeMagnitude]
+  );
+}
+
 async function upsertConnectionStrength(
   client: PoolClient,
   sessionId: string,
@@ -887,18 +1147,14 @@ async function upsertConnectionStrength(
   headlineId: string | null,
   increment: number
 ): Promise<{ created: boolean; selfEdgeSkipped: boolean; rejected: boolean }> {
-  const source = await upsertNode(client, sessionId, {
-    name: draft.source,
-    type: 'entity',
-    summary: '',
-    attributes: [],
-  }, headlineId, 0);
-  const target = await upsertNode(client, sessionId, {
-    name: draft.target,
-    type: 'entity',
-    summary: '',
-    attributes: [],
-  }, headlineId, 0);
+  // Relationships may connect pages, but they must never create blank pages as
+  // a side effect. New actors have to arrive through an explicit newNodes plan
+  // (or the helper creation-candidate workflow) first.
+  const source = await resolveExistingNodeByName(client, sessionId, draft.source);
+  const target = await resolveExistingNodeByName(client, sessionId, draft.target);
+  if (!source || !target) {
+    return { created: false, selfEdgeSkipped: false, rejected: true };
+  }
 
   if (source.id === target.id) {
     return { created: false, selfEdgeSkipped: true, rejected: false };
@@ -962,6 +1218,7 @@ async function applyInitialGraph(
 
   try {
     await client.query('BEGIN');
+    await lockWorldModelSession(client, sessionId);
 
     for (const node of output.nodes) {
       const result = await upsertNode(client, sessionId, node, null, 0);
@@ -1004,6 +1261,7 @@ async function applyHeadlineIntake(
 
   try {
     await client.query('BEGIN');
+    await lockWorldModelSession(client, sessionId);
 
     await onStage?.('creating_new_actor_nodes');
     for (const node of output.newNodes) {
@@ -1029,18 +1287,13 @@ async function applyHeadlineIntake(
 
     for (const [index, event] of output.directEvents.entries()) {
       const eventId = cleanEventId(event.eventId, `direct_${index + 1}`);
-      const targetNode = await upsertNode(
-        client,
-        sessionId,
-        {
-          name: event.targetNodeName,
-          type: 'entity',
-          summary: '',
-          attributes: [],
-        },
-        headlineId,
-        0
-      );
+      const targetNode = await resolveExistingNodeByName(client, sessionId, event.targetNodeName);
+      if (!targetNode) {
+        console.warn(
+          `[WorldState ${sessionId}] Skipping direct event ${eventId}: target page "${event.targetNodeName}" was not explicitly created.`
+        );
+        continue;
+      }
 
       result.directEvents.push({
         id: eventId,
@@ -1079,6 +1332,7 @@ async function applyAffectedReaction(
 
   try {
     await client.query('BEGIN');
+    await lockWorldModelSession(client, sessionId);
 
     const nodeResult = await upsertNode(
       client,
@@ -1656,12 +1910,15 @@ export async function getWorldStateForJoinCode(joinCode: string) {
   const session = sessionResult.rows[0];
   const worldConfig = normalizeWorldStateConfig(session.world_state_config);
   const includeAllJobs = session.phase === 'FINISHED';
-  const [nodesResult, edgesResult, jobsResult, queueResult] = await Promise.all([
+  const [nodesResult, edgesResult, jobsResult, queueResult, revisionsResult, candidatesResult] = await Promise.all([
     pool.query(
-      `SELECT id, name, type, summary, attributes, times_updated, created_at, updated_at
+      `SELECT id, name, type, summary, attributes, aliases, times_updated,
+              revision_no, last_content_update_at, last_consulted_at,
+              consultations_since_update, change_velocity,
+              last_change_magnitude, update_priority, created_at, updated_at
        FROM world_state_nodes
        WHERE session_id = $1
-       ORDER BY times_updated DESC, updated_at DESC, name ASC`,
+       ORDER BY update_priority DESC, times_updated DESC, updated_at DESC, name ASC`,
       [session.id]
     ),
     pool.query(
@@ -1709,6 +1966,33 @@ export async function getWorldStateForJoinCode(joinCode: string) {
          COUNT(*) FILTER (WHERE status = 'running')::int AS running
        FROM world_state_jobs
        WHERE session_id = $1`,
+      [session.id]
+    ),
+    pool.query(
+      `SELECT
+         r.id, r.node_id, n.name AS node_name, r.revision_no, r.operation,
+         r.source_kind, r.source_headline_id, r.source_helper_message_id,
+         r.effective_at, r.summary_delta, r.rationale, r.evidence,
+         r.confidence, r.change_magnitude, r.model, r.usage, r.created_at
+       FROM world_state_page_revisions r
+       JOIN world_state_nodes n ON n.id = r.node_id
+       WHERE r.session_id = $1
+       ORDER BY r.effective_at DESC, r.created_at DESC
+       LIMIT 120`,
+      [session.id]
+    ),
+    pool.query(
+      `SELECT
+         id, proposed_name, proposed_type, aliases, justification, evidence,
+         source_query, mention_count, confidence, novelty, connection_potential,
+         priority_score, status, accepted_node_id, resolved_at, created_at, updated_at
+       FROM world_state_creation_candidates
+       WHERE session_id = $1
+       ORDER BY
+         CASE status WHEN 'queued' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END,
+         priority_score DESC,
+         updated_at DESC
+       LIMIT 100`,
       [session.id]
     ),
   ]);
@@ -1797,6 +2081,8 @@ export async function getWorldStateForJoinCode(joinCode: string) {
     stats: {
       nodeCount: nodesResult.rowCount,
       edgeCount: edgesResult.rowCount,
+      revisionCount: revisionsResult.rowCount,
+      queuedCreationCandidates: candidatesResult.rows.filter((row) => row.status === 'queued').length,
       queuedJobs: queueResult.rows[0]?.queued ?? 0,
       runningJobs: queueResult.rows[0]?.running ?? 0,
     },
@@ -1806,7 +2092,15 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       type: row.type,
       summary: row.summary,
       attributes: row.attributes,
+      aliases: row.aliases ?? [],
       timesUpdated: row.times_updated,
+      revisionNo: row.revision_no,
+      lastContentUpdateAt: row.last_content_update_at,
+      lastConsultedAt: row.last_consulted_at,
+      consultationsSinceUpdate: row.consultations_since_update,
+      changeVelocity: Number(row.change_velocity ?? 0),
+      lastChangeMagnitude: Number(row.last_change_magnitude ?? 0),
+      updatePriority: Number(row.update_priority ?? 0),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     })),
@@ -1838,11 +2132,61 @@ export async function getWorldStateForJoinCode(joinCode: string) {
       completedAt: row.completed_at,
       updatedAt: row.updated_at,
     })),
+    revisions: revisionsResult.rows.map((row) => ({
+      id: row.id,
+      nodeId: row.node_id,
+      nodeName: row.node_name,
+      revisionNo: row.revision_no,
+      operation: row.operation,
+      sourceKind: row.source_kind,
+      sourceHeadlineId: row.source_headline_id,
+      sourceHelperMessageId: row.source_helper_message_id,
+      effectiveAt: row.effective_at,
+      summaryDelta: row.summary_delta,
+      rationale: row.rationale,
+      evidence: row.evidence,
+      confidence: Number(row.confidence ?? 0),
+      changeMagnitude: Number(row.change_magnitude ?? 0),
+      model: row.model,
+      usage: row.usage,
+      createdAt: row.created_at,
+    })),
+    creationCandidates: candidatesResult.rows.map((row) => ({
+      id: row.id,
+      proposedName: row.proposed_name,
+      proposedType: row.proposed_type,
+      aliases: row.aliases,
+      justification: row.justification,
+      evidence: row.evidence,
+      sourceQuery: row.source_query,
+      mentionCount: row.mention_count,
+      confidence: Number(row.confidence ?? 0),
+      novelty: Number(row.novelty ?? 0),
+      connectionPotential: Number(row.connection_potential ?? 0),
+      priorityScore: Number(row.priority_score ?? 0),
+      status: row.status,
+      acceptedNodeId: row.accepted_node_id,
+      resolvedAt: row.resolved_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })),
   };
 }
 
 export class WorldStateProcessor {
   async startQueuedJobs(): Promise<number> {
+    // Helper page edits are synchronous and cannot be safely replayed from a
+    // half-applied LLM plan. Close abandoned runs on restart so they do not
+    // remain permanently "running" in the admin dashboard.
+    await pool.query(
+      `UPDATE world_state_jobs
+       SET status = 'error',
+           stage = 'helper_gap_abandoned',
+           error = COALESCE(error, 'Helper world-model operation was interrupted before completion.'),
+           completed_at = CURRENT_TIMESTAMP
+       WHERE kind = 'helper'
+         AND status IN ('queued', 'running')`
+    );
     const result = await pool.query(
       `UPDATE world_state_jobs
        SET status = 'running',
@@ -1905,6 +2249,7 @@ export class WorldStateProcessor {
 
     try {
       await client.query('BEGIN');
+      await lockWorldModelSession(client, sessionId);
       await client.query(
         `UPDATE world_state_jobs
          SET status = 'error',

@@ -378,6 +378,7 @@ class AiPlayerManager {
         playerId: input.id,
         question,
         clientRequestId: `ai-helper-${input.id}-${Date.now()}`,
+        allowWorldMutation: false,
       });
       const insight = helperMessageToInsight(message);
       return insight ? [insight] : [];

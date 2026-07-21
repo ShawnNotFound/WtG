@@ -174,6 +174,14 @@ export interface WorldHelperMessage {
   error: string | null;
   createdAt: string;
   completedAt: string | null;
+  worldUpdate?: {
+    status: 'not_needed' | 'applied' | 'queued' | 'error';
+    operation: 'CREATE' | 'UPDATE' | 'ANSWER' | 'INCORPORATE';
+    coverage: 'SUFFICIENT' | 'MISSING' | 'STALE' | 'NOT_WORLD_FACT' | 'UNKNOWN';
+    createdNodes: Array<{ id: string; name: string; revisionNo: number }>;
+    updatedNodes: Array<{ id: string; name: string; revisionNo: number }>;
+    queuedCandidates: Array<{ id: string; name: string; priorityScore: number }>;
+  } | null;
 }
 
 interface SubmitHeadlineResult {

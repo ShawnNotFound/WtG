@@ -15,7 +15,7 @@ interface WorldHelperDrawerProps {
 
 const DEFAULT_SUGGESTIONS = [
   'What is the most important tension in the world right now?',
-  'Which planet should I target for a higher score?',
+  'How does my current planet panel work?',
   'Which entities changed the most recently?',
 ];
 
@@ -143,6 +143,16 @@ export function WorldHelperDrawer({
                         <span className="text-[11px] text-gray-400">{message.model}</span>
                       )}
                     </div>
+
+                    {message.worldUpdate?.status === 'applied' &&
+                      (message.worldUpdate.createdNodes.length > 0 || message.worldUpdate.updatedNodes.length > 0) && (
+                        <p className="rounded-lg border border-purple-100 bg-purple-50 px-3 py-2 text-xs text-purple-800">
+                          World model filled this question&apos;s gap: {[
+                            ...message.worldUpdate.createdNodes.map((node) => `created ${node.name}`),
+                            ...message.worldUpdate.updatedNodes.map((node) => `updated ${node.name}`),
+                          ].join(', ')}.
+                        </p>
+                      )}
 
                     {message.answer.headlineRefs.length > 0 && (
                       <div className="space-y-1.5">
